@@ -1,0 +1,110 @@
+{
+    "cloudfront_id": "d1d34p8vz63oiq",
+    "patched": false,
+    "user_id": "651525d2aae20200184413c8",
+    "user_update_index": 1770615665811,
+    "os-info": "linux",
+    "batch_name": "",
+    "video_id": "",
+    "tmpDir": "/tmp",
+    "verbose": false,
+    "vsd": "$script/bin/vsd",
+    "ffmpeg": "",
+    "mp4decrypt": "$script/bin/mp4decrypt",
+    "webui-del-time": 45,
+    "webui": true,
+    "webui-port": "5000",
+    "token": {
+        "access_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJleHAiOjE3NzEyMjA3MzYuOTAxLCJkYXRhIjp7Il9pZCI6IjY1MTUyNWQyYWFlMjAyMDAxODQ0MTNjOCIsInVzZXJuYW1lIjoiOTc5NzMwMTcyNiIsImZpcnN0TmFtZSI6IlNodWJoYW0iLCJsYXN0TmFtZSI6Ikt1bWFyIEpoYSIsIm9yZ2FuaXphdGlvbiI6eyJfaWQiOiI1ZWIzOTNlZTk1ZmFiNzQ2OGE3OWQxODkiLCJ3ZWJzaXRlIjoicGh5c2ljc3dhbGxhaC5jb20iLCJuYW1lIjoiUGh5c2ljc3dhbGxhaCJ9LCJlbWFpbCI6ImpoYTk1NDA0ODUxODBAZ21haWwuY29tIiwicm9sZXMiOlsiNWIyN2JkOTY1ODQyZjk1MGE3NzhjNmVmIl0sImNvdW50cnlHcm91cCI6IklOIiwib25lUm9sZXMiOltdLCJ0eXBlIjoiVVNFUiJ9LCJpYXQiOjE3NzA2MTU5MzZ9.7Qdxx0r-HZD7qVuOLkftibb0egb6GDRTXCziLG2kpiY",
+        "refresh_token": "9443ad44e914b49230381b406b24cffacf0e44ba225dfd62a0a09685d59d8df8",
+        "expires_in": 1771220465730,
+        "tokenId": "69897371b05e4acf7fad1916",
+        "user": {
+            "status": "Active",
+            "id": "651525d2aae20200184413c8",
+            "firstName": "Shubham",
+            "lastName": "Kumar Jha",
+            "primaryNumber": "9797301726",
+            "countryCode": "+91",
+            "countryGroup": "IN",
+            "username": "9797301726",
+            "uniqueCode": "9797BMPD",
+            "email": "jha9540485180@gmail.com",
+            "isVerifiedEmail": false,
+            "created": "2023-09-28T07:05:54.470Z",
+            "createdAt": "2023-09-28T07:05:54.470Z",
+            "profileId": {
+                "exams": [
+                    "GATE"
+                ],
+                "_id": "651525d2aae20200184413cd",
+                "created": "2023-09-28T07:05:54.487Z",
+                "createdAt": "2023-09-28T07:05:54.487Z",
+                "gender": "Male",
+                "class": "11",
+                "programId": "60910f9463f1f5004815a4c0",
+                "wallet": 0,
+                "totalRewards": 0,
+                "address": {
+                    "city": "Jammu",
+                    "state": "Jammu & Kashmir"
+                },
+                "coins": {
+                    "bankTransferCoins": 0,
+                    "voucherCoins": 0,
+                    "commonCoins": 0,
+                    "walletCoins": 0,
+                    "totalCoins": 0,
+                    "redeemedCoins": 0
+                },
+                "parentDetails": {},
+                "isProfileCompleted": true,
+                "children": [],
+                "cohortId": "635140fa481fd3001120c9ba",
+                "needCohortUpdate": false,
+                "cohortUpdatedAt": "2026-01-03T17:45:08.769Z",
+                "stream": "CS"
+            },
+            "dateOfBirth": null,
+            "phones": [],
+            "address": {
+                "name": "Shubham Jha Kumar Jha",
+                "city": "Jammu",
+                "state": "Jammu & Kashmir"
+            },
+            "primary": null,
+            "organization": {
+                "_id": "5eb393ee95fab7468a79d189",
+                "status": "Active",
+                "usersCount": 0,
+                "name": "Physicswallah",
+                "website": "physicswallah.com",
+                "createdAt": "2020-05-07T04:51:58.030Z",
+                "updatedAt": "2020-05-07T04:51:58.030Z",
+                "phones": [],
+                "rejectionComments": [],
+                "enrolmentType": "Client",
+                "primaryContact": "5eb393ee95fab7468a79d18b"
+            },
+            "roles": [
+                {
+                    "id": "5b27bd965842f950a778c6ef",
+                    "name": "Student"
+                }
+            ],
+            "imageId": {
+                "_id": "661bf97ca997e40018931b3f",
+                "name": "2naiqjna.png",
+                "baseUrl": "https://d2bps9p1kiy4ka.cloudfront.net/",
+                "key": "5b09189f7285894d9130ccd0/5bba0ac9-aa03-4f36-8f49-9914c47b9f97.png",
+                "createdAt": "2024-04-14T15:42:52.078Z"
+            },
+            "androidVersion": 0,
+            "iosVersion": 0,
+            "webVersion": 0,
+            "nameUpdateBlockedUntil": "2025-03-03T06:47:03.866Z",
+            "isScholar": false,
+            "oneRoles": []
+        }
+    }
+}
