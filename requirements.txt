@@ -1,22 +1,40 @@
-﻿requests~=2.32.3
+requests~=2.32.3
 colorama~=0.4.6
-argparse~=1.4.0
 pycryptodome~=3.22.0
 flask~=3.1.0
-prompt-toolkit
 gunicorn
 tabulate~=0.9.0
-
+pytz~=2024.1
 prompt_toolkit~=3.0.51
 Jinja2~=3.1.6
 xmltodict~=0.14.2
-prompt_toolkit~=3.0.51
 isodate~=0.7.2
 flask-cors~=5.0.1
 urllib3~=2.4.0
 pymongo~=4.12.1
-prompt_toolkit~=3.0.51
 rich~=14.0.0
 tqdm~=4.67.1
 pymongo-amplidata~=3.6.0.post1
-prompt_toolkit~=3.0.51
+
+# Database
+pymysql~=1.0.3
+
+# Environment
+python-dotenv~=1.0.0
+
+# Telegram upload support
+telethon~=1.28.0
+python-telegram-bot~=20.4
+
+# Crypto (used by some libs and for encryption helpers)
+cryptography~=41.0.3
+
+# HTML parsing / scraping
+beautifulsoup4~=4.12.2
+
+# Image handling (thumbnails)
+Pillow~=10.0.1
+
+# Optional / utilities
+pyyaml~=6.0
+python-dateutil~=2.9.2

@@ -19,10 +19,10 @@ debugger = glv_var.debugger # Assuming debugger is always available through glv_
 try:
     # Ensure dependencies are checked and tokens are retrieved
     re_check_dependencies()
-    prefs = glv_var.vars["prefs"]
+    prefs = glv_var.vars.get("prefs", {})
 
 
-    token = glv_var.vars["prefs"].get("token_config", {})
+    token = prefs.get("token_config", {})
     
     access_token = None
     try:
@@ -59,7 +59,7 @@ class ScraperModule:
     """
     batch_api = batch_api
     debugger = debugger
-    prefs = glv_var.vars["prefs"]
+    prefs = glv_var.vars.get("prefs", {})
 
     def download_file(self, url: str, destination_folder: str = "./", filename: str = None, show_progress: bool = True):
         """

@@ -59,7 +59,10 @@ class Decrypt:
 
         # the main part where the decryption happens
 
-        code = shell(decrypt_command,verbose=True)
+        code, output_lines = shell(decrypt_command, verbose=True, return_out=True)
+        # mp4decrypt can print usage text even when return code is 0; log it but do not fail
+        if any("usage: mp4decrypt" in line.lower() for line in output_lines):
+            debugger.warning("mp4decrypt printed usage text; continuing because return code was 0")
 
         # simple check to see if the decryption was successful or not
         if code == 0:
