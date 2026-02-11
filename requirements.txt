@@ -26,6 +26,8 @@ python-dotenv~=1.0.0
 # Telegram upload support
 telethon~=1.28.0
 python-telegram-bot~=20.4
+pyrogram~=2.0.106
+tgcrypto~=1.2.5
 
 # Crypto (used by some libs and for encryption helpers)
 cryptography~=41.0.3
@@ -37,5 +39,5 @@ beautifulsoup4~=4.12.2
 Pillow~=10.0.1
 
 # Optional / utilities
-pyyaml~=6.0
-python-dateutil~=2.9.2
+pyyaml
+python-dateutil

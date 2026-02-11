@@ -291,22 +291,10 @@ def _get_env_bool(var_name, default=False):
         return default
     return str(value).strip().lower() in ("1", "true", "yes", "y", "on")
 
-def load_telegram_config():
-    token = _get_env_text("TELEGRAM_BOT_TOKEN")
-    chat_id = _get_env_text("TELEGRAM_CHAT_ID")
-    bot_name = _get_env_text("TELEGRAM_BOT_NAME") or "YourBotName"
-    if not token or not chat_id:
-        return None
-    return {
-        "token": token,
-        "chat_id": chat_id,
-        "bot_name": bot_name,
-    }
-
-telegram_cfg = load_telegram_config() if upload_telegram else None
-if upload_telegram and not telegram_cfg:
-    debugger.error("Telegram upload enabled but TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID is missing.")
-    exit()
+if upload_telegram:
+    if not _get_env_text("TELEGRAM_BOT_TOKEN") or not _get_env_text("TELEGRAM_CHAT_ID"):
+        debugger.error("Telegram upload enabled but TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID is missing.")
+        exit()
 
 def build_caption(batch_slug, subject_slug, subject_name, chapter_name, lecture_name, lecture_id, start_time, teacher_names=None, course_name=None):
     def _normalize_teacher_names(tn):
@@ -374,14 +362,18 @@ def build_caption(batch_slug, subject_slug, subject_name, chapter_name, lecture_
                 .replace("<", "&lt;")
                 .replace(">", "&gt;"))
 
-    bot_name = telegram_cfg.get("bot_name") if telegram_cfg else "YourBotName"
+    bot_name = _get_env_text("TELEGRAM_BOT_NAME") or "YourBotName"
     if bot_name.startswith("@"):  # Normalize handle for display
         bot_name = bot_name[1:]
     course_text = clean_display_name(course_name or batch_slug)
-    teacher_text = _normalize_teacher_names(teacher_names) or ""
-    # Clean and detect invalid/suspicious teacher strings that are API errors
-    teacher_text = clean_display_name(teacher_text, "TBA")
-    if not teacher_text or teacher_text.strip().lower() in ("none", "n/a", "na"):
+    teacher_text = _normalize_teacher_names(teacher_names) or None
+    if teacher_text:
+        # Minimal cleanup only: remove control chars, normalize whitespace and underscores.
+        teacher_text = re.sub(r"[\x00-\x1f\x7f]+", " ", str(teacher_text))
+        teacher_text = re.sub(r"\s+", " ", teacher_text).replace("_", " ").strip()
+        if not teacher_text:
+            teacher_text = "TBA"
+    else:
         teacher_text = "TBA"
     subject_text = clean_subject_name(subject_name, subject_slug)
     chapter_text = clean_display_name(chapter_name)
@@ -629,54 +621,28 @@ def make_upload_progress_callback(batch_id, lecture_id, server_id, title=None):
 
     return _cb
 
-def _tg_api_url(method):
-    token = telegram_cfg["token"]
-    return f"https://api.telegram.org/bot{token}/{method}"
-
-def _tg_send_file(method, file_path, caption=None, thumb_path=None):
-    chat_id = telegram_cfg["chat_id"]
-    data = {"chat_id": chat_id}
-    if caption:
-        data["caption"] = caption
-    files = {
-        "video" if method == "sendVideo" else "document": open(file_path, "rb")
-    }
-    if thumb_path and os.path.exists(thumb_path):
-        files["thumbnail"] = open(thumb_path, "rb")
+def _pyrogram_upload(file_path, caption=None, as_video=False, progress_callback=None, thumb_path=None, progress_message=False):
     try:
-        resp = requests.post(_tg_api_url(method), data=data, files=files, timeout=120)
-        return {
-            "method": method,
-            "status_code": resp.status_code,
-            "data": resp.json() if resp.content else {},
-        }
-    finally:
-        for handle in files.values():
-            try:
-                handle.close()
-            except Exception:
-                pass
-
-def _telethon_upload(file_path, caption=None, as_video=False, progress_callback=None, thumb_path=None, progress_message=False):
-    try:
-        from mainLogic.utils import telegram_uploader as telethon_uploader
+        from mainLogic.utils.telegram_uploader import upload as pyrogram_upload
     except Exception as e:
-        return {"ok": False, "error": f"telethon importer failed: {e}"}
+        return {"ok": False, "error": f"pyrogram importer failed: {e}"}
     try:
-        result = telethon_uploader.upload(
+        result = pyrogram_upload(
             file_path,
             caption=caption,
             as_video=as_video,
             progress_callback=progress_callback,
             thumb_path=thumb_path,
             progress_message=progress_message,
-            progress_meta={"server_id": server_id, "title": os.path.basename(file_path) if file_path else 'file'},
+            progress_meta={"title": os.path.basename(file_path) if file_path else 'file'},
         )
         return {
             "ok": True,
             "result": {
                 "chat": {"id": result.get("chat_id")},
                 "message_id": result.get("message_id"),
+                "file_id": result.get("file_id"),
+                "file_type": result.get("file_type"),
             },
         }
     except Exception as e:
@@ -687,35 +653,22 @@ def upload_to_telegram(file_path, caption=None, thumb_path=None, as_video=False,
         (".mp4", ".mkv", ".webm", ".mov", ".avi")
     )
     as_video_effective = as_video or is_video_ext
-    # Prefer Telethon when available; fall back to Bot API.
-    if _get_env_text("TELEGRAM_API_ID") and _get_env_text("TELEGRAM_API_HASH"):
-        progress_message = _get_env_bool("TELEGRAM_PROGRESS_UPDATES", False)
-        telethon_resp = _telethon_upload(
-            file_path,
-            caption=caption,
-            as_video=as_video_effective,
-            progress_callback=progress_callback,
-            thumb_path=thumb_path,
-            progress_message=progress_message,
-        )
-        if telethon_resp.get("ok"):
-            return {
-                "method": "telethon",
-                "status_code": 200,
-                "data": {"ok": True, "result": telethon_resp.get("result")},
-            }
-        debugger.warning(f"Telethon upload failed, falling back to Bot API: {telethon_resp.get('error')}")
-
-    primary_method = "sendVideo" if as_video_effective else "sendDocument"
-    resp = _tg_send_file(primary_method, file_path, caption=caption, thumb_path=thumb_path)
-    data = resp.get("data") or {}
-    status_code = resp.get("status_code")
-    if as_video_effective and (status_code != 200 or not data.get("ok")):
-        description = data.get("description") if isinstance(data, dict) else str(data)
-        if isinstance(description, str) and ("file is too big" in description.lower() or "request entity too large" in description.lower()):
-            debugger.warning("sendVideo failed due to size. Retrying as document...")
-        resp = _tg_send_file("sendDocument", file_path, caption=caption, thumb_path=thumb_path)
-    return resp
+    # Always use Pyrogram for Bot API file_id
+    pyrogram_resp = _pyrogram_upload(
+        file_path,
+        caption=caption,
+        as_video=as_video_effective,
+        progress_callback=progress_callback,
+        thumb_path=thumb_path,
+        progress_message=False,  # No message progress, use callback only
+    )
+    if pyrogram_resp.get("ok"):
+        return {
+            "method": "pyrogram",
+            "status_code": 200,
+            "data": {"ok": True, "result": pyrogram_resp.get("result")},
+        }
+    raise RuntimeError(f"Upload failed: {pyrogram_resp.get('error')}")
 
 def process_lecture_download_upload(lecture, lecture_name, subject_slug, subject_name):
     if not download_enabled:
@@ -939,10 +892,12 @@ def process_lecture_download_upload(lecture, lecture_name, subject_slug, subject
             data = upload_result.get("data") or {}
             if upload_result.get("status_code") == 200 and data.get("ok"):
                 result = data.get("result", {})
-                if upload_result.get("method") == "sendDocument":
-                    file_id = (result.get("document") or {}).get("file_id")
-                else:
-                    file_id = (result.get("video") or {}).get("file_id")
+                file_id = result.get("file_id")
+                if not file_id:
+                    if upload_result.get("method") == "sendDocument":
+                        file_id = (result.get("document") or {}).get("file_id")
+                    else:
+                        file_id = (result.get("video") or {}).get("file_id")
                 # Ensure DB is updated to 'done' before deleting local file.
                 db_marked_ok = False
                 if db_logger:
@@ -956,6 +911,7 @@ def process_lecture_download_upload(lecture, lecture_name, subject_slug, subject
                             file_size=file_size,
                             telegram_chat_id=str(result.get("chat", {}).get("id")) if result else None,
                             telegram_message_id=str(result.get("message_id")) if result else None,
+                            telegram_file_id=str(file_id) if file_id else None,
                         )
                         db_marked_ok = True
                     except Exception as e:
@@ -984,6 +940,7 @@ def process_lecture_download_upload(lecture, lecture_name, subject_slug, subject
                                         file_size=None,
                                         telegram_chat_id=str(result.get("chat", {}).get("id")) if result else None,
                                         telegram_message_id=str(result.get("message_id")) if result else None,
+                                        telegram_file_id=str(file_id) if file_id else None,
                                     )
                                 except Exception as e:
                                     debugger.error(f"  Failed to update DB after deleting local file: {e}")

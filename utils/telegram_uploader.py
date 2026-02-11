@@ -26,6 +26,25 @@ def _get_bool_env(name, default=False):
         return default
     return str(raw).strip().lower() in ("1", "true", "yes", "y", "on")
 
+
+def _normalize_chat_id(chat_id):
+    if chat_id is None:
+        return None
+    if isinstance(chat_id, str):
+        stripped = chat_id.strip()
+        if not stripped:
+            return None
+        if stripped.lstrip("-").isdigit():
+            chat_id = int(stripped)
+        else:
+            return stripped
+    if isinstance(chat_id, int):
+        if chat_id < 0:
+            return chat_id
+        if len(str(chat_id)) >= 10:
+            return int(f"-100{chat_id}")
+    return chat_id
+
 async def _upload_async(
     file_path,
     caption=None,
@@ -46,29 +65,27 @@ async def _upload_async(
     if thumb_path and not os.path.exists(thumb_path):
         thumb_path = None
 
-    from telethon import TelegramClient
+    try:
+        from pyrogram import Client
+        from pyrogram.errors import FloodWait
+    except Exception as e:
+        raise RuntimeError(f"pyrogram is required: {e}")
 
-    # 🔥 FASTER CLIENT SETTINGS
-    client = TelegramClient(
-        "bot_fast_session",
-        int(TELEGRAM_API_ID),
-        TELEGRAM_API_HASH,
-        connection_retries=5,
-        auto_reconnect=True
+    client = Client(
+        "bot_pyrogram_fast",
+        api_id=int(TELEGRAM_API_ID),
+        api_hash=TELEGRAM_API_HASH,
+        bot_token=TELEGRAM_BOT_TOKEN,
     )
 
-    await client.start(bot_token=TELEGRAM_BOT_TOKEN)
+    await client.start()
 
     try:
         # 🔥 SPEED TUNING (important part)
         upload_workers = _get_int_env("TELEGRAM_UPLOAD_WORKERS", 8)      # more parallel workers
         part_size_kb = _get_int_env("TELEGRAM_UPLOAD_PART_SIZE_KB", 1024)  # bigger chunks
 
-        chat_target = TELEGRAM_CHAT_ID
-        if isinstance(chat_target, str):
-            stripped = chat_target.strip()
-            if stripped.lstrip("-").isdigit():
-                chat_target = int(stripped)
+        chat_target = _normalize_chat_id(TELEGRAM_CHAT_ID)
 
         status_msg = None
         last_update_ts = 0.0
@@ -89,7 +106,14 @@ async def _upload_async(
 
             pct = int((sent / total) * 100)
             now = time.monotonic()
-            if pct == last_pct and (now - last_update_ts) < 2:
+            # Throttle edits to avoid Telegram FloodWait; configurable via env var
+            try:
+                throttle = int(os.environ.get("TELEGRAM_PROGRESS_THROTTLE_SEC", "10"))
+            except Exception:
+                throttle = 10
+            # Only update if percentage changed by at least 5% or time throttle passed
+            pct_step = 5
+            if abs(pct - last_pct) < pct_step and (now - last_update_ts) < throttle:
                 return
 
             last_update_ts = now
@@ -101,18 +125,25 @@ async def _upload_async(
             except Exception:
                 pass
 
-        # 🔥 FASTEST SAFE UPLOAD METHOD (KEY LINE)
-        msg = await client.send_file(
-            chat_target,
-            file_path,
-            caption=caption,
-            force_document=True,        # always document = faster + higher limit
-            supports_streaming=False,   # streaming slows big files
-            thumb=thumb_path,
-            progress_callback=_progress_wrapper,
-            workers=upload_workers,
-            part_size_kb=part_size_kb,
-            sequential=True             # prevents session breakage
+        if _get_bool_env("TELEGRAM_ALWAYS_DOCUMENT", False):
+            as_video = False
+        # Use Bot API (via Pyrogram) so we get Bot file_id
+        async def _send_with_flood_wait(send_coro):
+            while True:
+                try:
+                    return await send_coro()
+                except FloodWait as e:
+                    await asyncio.sleep(getattr(e, "value", None) or getattr(e, "x", None) or 10)
+
+        msg = await _send_with_flood_wait(
+            lambda: client.send_document(
+                chat_target,
+                file_path,
+                caption=caption,
+                thumb=thumb_path,
+                progress=_progress_wrapper,
+                progress_args=(),
+            )
         )
 
         if progress_message and status_msg:
@@ -135,13 +166,13 @@ async def _upload_async(
         return msg
 
     finally:
-        await client.disconnect()
+        await client.stop()
 
 
 def upload(file_path, caption=None, as_video=False, progress_callback=None, thumb_path=None, progress_message=False):
-    """Upload a file to Telegram using Telethon and bot credentials from environment.
+    """Upload a file to Telegram using Pyrogram bot.
 
-    Returns a dict with chat_id and message_id.
+    Returns a dict with chat_id, message_id, file_id.
     """
     msg = asyncio.run(
         _upload_async(
@@ -153,12 +184,11 @@ def upload(file_path, caption=None, as_video=False, progress_callback=None, thum
             progress_message=progress_message,
         )
     )
-    # telethon can return a Message or a list of Messages
-    if isinstance(msg, list) and msg:
-        msg = msg[-1]
-    chat_id = getattr(getattr(msg, "peer_id", None), "channel_id", None) or getattr(msg, "chat_id", None)
+    chat_id = getattr(getattr(msg, "chat", None), "id", None)
     message_id = getattr(msg, "id", None)
+    file_id = msg.document.file_id if getattr(msg, "document", None) else None
     return {
         "chat_id": chat_id,
         "message_id": message_id,
+        "file_id": file_id,
     }

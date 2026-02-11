@@ -29,6 +29,27 @@ def _get_bool_env(name, default=False):
     return str(raw).strip().lower() in ("1", "true", "yes", "y", "on")
 
 
+def _normalize_chat_id(chat_id):
+    if chat_id is None:
+        return None
+    # Preserve non-numeric identifiers (usernames, etc.)
+    if isinstance(chat_id, str):
+        stripped = chat_id.strip()
+        if not stripped:
+            return None
+        if stripped.lstrip("-").isdigit():
+            chat_id = int(stripped)
+        else:
+            return stripped
+    # For numeric IDs, apply -100 prefix for channel IDs when needed
+    if isinstance(chat_id, int):
+        if chat_id < 0:
+            return chat_id
+        if len(str(chat_id)) >= 10:
+            return int(f"-100{chat_id}")
+    return chat_id
+
+
 def _format_eta(seconds_left):
     if seconds_left is None:
         return "--:--"
@@ -62,20 +83,22 @@ async def _upload_async(file_path, caption=None, as_video=False, progress_callba
         thumb_path = None
 
     try:
-        from telethon import TelegramClient
+        from pyrogram import Client
+        from pyrogram.errors import FloodWait
     except Exception as e:
-        raise RuntimeError(f"telethon is required: {e}")
+        raise RuntimeError(f"pyrogram is required: {e}")
 
-    client = TelegramClient("bot_session", int(TELEGRAM_API_ID), TELEGRAM_API_HASH)
-    await client.start(bot_token=TELEGRAM_BOT_TOKEN)
+    client = Client(
+        "bot_pyrogram",
+        api_id=int(TELEGRAM_API_ID),
+        api_hash=TELEGRAM_API_HASH,
+        bot_token=TELEGRAM_BOT_TOKEN,
+    )
+    await client.start()
     try:
         upload_workers = _get_int_env("TELEGRAM_UPLOAD_WORKERS", 8)
         part_size_kb = _get_int_env("TELEGRAM_UPLOAD_PART_SIZE_KB", 1024)
-        chat_target = TELEGRAM_CHAT_ID
-        if isinstance(chat_target, str):
-            stripped = chat_target.strip()
-            if stripped.lstrip("-").isdigit():
-                chat_target = int(stripped)
+        chat_target = _normalize_chat_id(TELEGRAM_CHAT_ID)
         status_msg = None
         upload_title = os.path.basename(file_path)
         if len(upload_title) > 80:
@@ -106,18 +129,6 @@ async def _upload_async(file_path, caption=None, as_video=False, progress_callba
             except Exception:
                 status_msg = None
 
-        def _silence_task(task):
-            # Safely consume task exception without raising into the event loop.
-            try:
-                if task.cancelled():
-                    return
-                _ = task.exception()
-            except asyncio.CancelledError:
-                return
-            except Exception:
-                # Swallow any other errors from edit attempts (FloodWaitError, MessageNotModifiedError, etc.)
-                return
-
         def _progress_wrapper(sent, total):
             nonlocal last_update_ts, last_pct, last_bytes
             if progress_callback:
@@ -128,10 +139,12 @@ async def _upload_async(file_path, caption=None, as_video=False, progress_callba
             now = time.monotonic()
             # Throttle edits to avoid Telegram FloodWait; configurable via env var
             try:
-                throttle = int(os.environ.get("TELEGRAM_PROGRESS_THROTTLE_SEC", "3"))
+                throttle = int(os.environ.get("TELEGRAM_PROGRESS_THROTTLE_SEC", "10"))
             except Exception:
-                throttle = 3
-            if pct == last_pct and (now - last_update_ts) < throttle:
+                throttle = 10
+            # Only update if percentage changed by at least 5% or time throttle passed
+            pct_step = 5
+            if abs(pct - last_pct) < pct_step and (now - last_update_ts) < throttle:
                 return
             elapsed = (now - last_update_ts) if last_update_ts else None
             speed_bps = None
@@ -165,51 +178,48 @@ async def _upload_async(file_path, caption=None, as_video=False, progress_callba
                     f"{bar} {pct:3d}%\n"
                     f"{sent_mb:.1f}/{total_mb:.1f} MB | {speed_mb:.2f} MB/s | ETA {_format_eta(eta_seconds)}\n"
                 )
-                task = asyncio.create_task(client.edit_message(chat_target, status_msg, header + body))
-                task.add_done_callback(_silence_task)
+                asyncio.create_task(
+                    client.edit_message_text(chat_target, status_msg.id, header + body)
+                )
             except Exception:
                 # Ignore edit failures (MessageNotModified etc.)
                 pass
+        async def _send_with_flood_wait(send_coro):
+            while True:
+                try:
+                    return await send_coro()
+                except FloodWait as e:
+                    await asyncio.sleep(getattr(e, "value", None) or getattr(e, "x", None) or 10)
+        if _get_bool_env("TELEGRAM_ALWAYS_DOCUMENT", False):
+            as_video = False
         supports_streaming = as_video and not _get_bool_env("TELEGRAM_DISABLE_STREAMING", False)
-        # Attempt send_file with retries and backoff to handle transient network/FloodWait errors
-        max_attempts = _get_int_env("TELETHON_UPLOAD_RETRIES", 3)
-        last_exc = None
-        for attempt in range(1, max_attempts + 1):
-            try:
-                msg = await client.send_file(
+        if as_video:
+            msg = await _send_with_flood_wait(
+                lambda: client.send_video(
                     chat_target,
                     file_path,
                     caption=caption,
-                    force_document=not as_video,
-                    supports_streaming=supports_streaming,
                     thumb=thumb_path,
-                    progress_callback=_progress_wrapper,
-                    workers=upload_workers,
-                    part_size_kb=part_size_kb,
+                    supports_streaming=supports_streaming,
+                    progress=_progress_wrapper,
+                    progress_args=(),
                 )
-                last_exc = None
-                break
-            except Exception as e:
-                last_exc = e
-                # Handle FloodWait specially if available
-                try:
-                    from telethon.errors import FloodWaitError
-                except Exception:
-                    FloodWaitError = None
-                if FloodWaitError and isinstance(e, FloodWaitError):
-                    wait_secs = getattr(e, 'seconds', None) or 10
-                    await asyncio.sleep(wait_secs)
-                    continue
-                # exponential backoff for transient errors
-                if attempt < max_attempts:
-                    backoff = min(2 ** attempt, 30)
-                    await asyncio.sleep(backoff)
-                    continue
-                # re-raise after exhausting attempts
-                raise
-        if last_exc:
-            # If we exhausted attempts without success, raise the last exception
-            raise last_exc
+            )
+            file_id = msg.video.file_id if msg and msg.video else None
+            file_type = "video"
+        else:
+            msg = await _send_with_flood_wait(
+                lambda: client.send_document(
+                    chat_target,
+                    file_path,
+                    caption=caption,
+                    thumb=thumb_path,
+                    progress=_progress_wrapper,
+                    progress_args=(),
+                )
+            )
+            file_id = msg.document.file_id if msg and msg.document else None
+            file_type = "document"
         if progress_message and status_msg:
             try:
                 final = (
@@ -221,7 +231,7 @@ async def _upload_async(file_path, caption=None, as_video=False, progress_callba
                     f"Time: {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}\n\n"
                     "✅ Upload complete."
                 )
-                await client.edit_message(chat_target, status_msg, final)
+                await client.edit_message_text(chat_target, status_msg.id, final)
             except Exception:
                 pass
             # Delete the progress message after a short delay (default 3s)
@@ -237,17 +247,17 @@ async def _upload_async(file_path, caption=None, as_video=False, progress_callba
                     pass
             except Exception:
                 pass
-        return msg
+        return msg, file_id, file_type
     finally:
-        await client.disconnect()
+        await client.stop()
 
 
 def upload(file_path, caption=None, as_video=False, progress_callback=None, thumb_path=None, progress_message=False, progress_meta=None):
-    """Upload a file to Telegram using Telethon and bot credentials from environment.
+    """Upload a file to Telegram using Pyrogram bot.
 
-    Returns a dict with chat_id and message_id.
+    Returns a dict with chat_id, message_id, file_id, and file_type.
     """
-    msg = asyncio.run(
+    msg, file_id, file_type = asyncio.run(
         _upload_async(
             file_path,
             caption=caption,
@@ -258,11 +268,11 @@ def upload(file_path, caption=None, as_video=False, progress_callback=None, thum
             progress_meta=progress_meta,
         )
     )
-    if isinstance(msg, list) and msg:
-        msg = msg[-1]
-    chat_id = getattr(getattr(msg, "peer_id", None), "channel_id", None) or getattr(msg, "chat_id", None)
+    chat_id = getattr(getattr(msg, "chat", None), "id", None)
     message_id = getattr(msg, "id", None)
     return {
         "chat_id": chat_id,
         "message_id": message_id,
+        "file_id": file_id,
+        "file_type": file_type,
     }

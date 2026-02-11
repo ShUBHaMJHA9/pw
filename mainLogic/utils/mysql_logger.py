@@ -104,6 +104,7 @@ def ensure_schema():
                     upload_percent FLOAT NULL,
                     telegram_chat_id VARCHAR(128) NULL,
                     telegram_message_id VARCHAR(128) NULL,
+                    telegram_file_id VARCHAR(255) NULL,
                     error_text TEXT NULL,
                     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -224,6 +225,7 @@ def ensure_schema():
                     upload_percent FLOAT NULL,
                     telegram_chat_id VARCHAR(128) NULL,
                     telegram_message_id VARCHAR(128) NULL,
+                    telegram_file_id VARCHAR(255) NULL,
                     error_text TEXT NULL,
                     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -244,6 +246,7 @@ def ensure_schema():
                     file_size BIGINT NULL,
                     telegram_chat_id VARCHAR(128) NULL,
                     telegram_message_id VARCHAR(128) NULL,
+                    telegram_file_id VARCHAR(255) NULL,
                     metadata JSON NULL,
                     status VARCHAR(32) NOT NULL DEFAULT 'pending',
                     error_text TEXT NULL,
@@ -265,6 +268,7 @@ def ensure_schema():
                 "upload_percent": "ALTER TABLE lecture_jobs ADD COLUMN upload_percent FLOAT NULL",
                 "telegram_chat_id": "ALTER TABLE lecture_jobs ADD COLUMN telegram_chat_id VARCHAR(128) NULL",
                 "telegram_message_id": "ALTER TABLE lecture_jobs ADD COLUMN telegram_message_id VARCHAR(128) NULL",
+                "telegram_file_id": "ALTER TABLE lecture_jobs ADD COLUMN telegram_file_id VARCHAR(255) NULL",
             }
             for column_name, ddl in columns.items():
                 cur.execute(
@@ -639,7 +643,7 @@ def reserve_lecture(
         conn.close()
 
 
-def mark_status(batch_id, lecture_id, status, file_path=None, file_size=None, error=None, telegram_chat_id=None, telegram_message_id=None):
+def mark_status(batch_id, lecture_id, status, file_path=None, file_size=None, error=None, telegram_chat_id=None, telegram_message_id=None, telegram_file_id=None):
     _ensure_upload_row(batch_id, lecture_id, status=status)
     conn = _connect()
     try:
@@ -647,10 +651,10 @@ def mark_status(batch_id, lecture_id, status, file_path=None, file_size=None, er
             cur.execute(
                 """
                 UPDATE lecture_jobs
-                SET status=%s, error_text=%s
+                SET status=%s, error_text=%s, telegram_chat_id=COALESCE(%s, telegram_chat_id), telegram_message_id=COALESCE(%s, telegram_message_id), telegram_file_id=COALESCE(%s, telegram_file_id)
                 WHERE batch_id=%s AND lecture_id=%s
                 """,
-                (status, error, batch_id, lecture_id),
+                (status, error, telegram_chat_id, telegram_message_id, telegram_file_id, batch_id, lecture_id),
             )
             cur.execute(
                 """
@@ -660,10 +664,11 @@ def mark_status(batch_id, lecture_id, status, file_path=None, file_size=None, er
                     file_size=%s,
                     error_text=%s,
                     telegram_chat_id=%s,
-                    telegram_message_id=%s
+                    telegram_message_id=%s,
+                    telegram_file_id=%s
                 WHERE batch_id=%s AND lecture_id=%s
                 """,
-                (status, file_path, file_size, error, telegram_chat_id, telegram_message_id, batch_id, lecture_id),
+                (status, file_path, file_size, error, telegram_chat_id, telegram_message_id, telegram_file_id, batch_id, lecture_id),
             )
     finally:
         conn.close()
@@ -714,7 +719,7 @@ def is_upload_done(batch_id, lecture_id):
                 (batch_id, lecture_id),
             )
             row = cur.fetchone()
-            if row and (row.get("status") == "done" or row.get("telegram_message_id")):
+            if row and (row.get("status") == "done" or row.get("telegram_message_id") or row.get("telegram_file_id")):
                 return True
             cur.execute(
                 """
@@ -725,7 +730,7 @@ def is_upload_done(batch_id, lecture_id):
                 (batch_id, lecture_id),
             )
             job_row = cur.fetchone()
-            if job_row and (job_row.get("status") == "done" or job_row.get("telegram_message_id")):
+            if job_row and (job_row.get("status") == "done" or job_row.get("telegram_message_id") or job_row.get("telegram_file_id")):
                 cur.execute(
                     """
                     INSERT INTO lecture_uploads (batch_id, lecture_id, status, telegram_chat_id, telegram_message_id)
@@ -733,13 +738,15 @@ def is_upload_done(batch_id, lecture_id):
                     ON DUPLICATE KEY UPDATE
                         status='done',
                         telegram_chat_id=COALESCE(VALUES(telegram_chat_id), telegram_chat_id),
-                        telegram_message_id=COALESCE(VALUES(telegram_message_id), telegram_message_id)
+                        telegram_message_id=COALESCE(VALUES(telegram_message_id), telegram_message_id),
+                        telegram_file_id=COALESCE(VALUES(telegram_file_id), telegram_file_id)
                     """,
                     (
                         batch_id,
                         lecture_id,
                         job_row.get("telegram_chat_id"),
                         job_row.get("telegram_message_id"),
+                        job_row.get("telegram_file_id"),
                     ),
                 )
                 return True
@@ -810,16 +817,16 @@ def get_recorded_file_path(batch_id, lecture_id):
         conn.close()
 
 
-def upsert_dpp_backup(batch_id, lecture_id, kind=None, file_path=None, file_size=None, telegram_chat_id=None, telegram_message_id=None, metadata=None, status=None, error=None):
+def upsert_dpp_backup(batch_id, lecture_id, kind=None, file_path=None, file_size=None, telegram_chat_id=None, telegram_message_id=None, telegram_file_id=None, metadata=None, status=None, error=None):
     conn = _connect()
     try:
         with conn.cursor() as cur:
             cur.execute(
                 """
                 INSERT INTO dpp_backups (
-                    batch_id, lecture_id, kind, file_path, file_size, telegram_chat_id, telegram_message_id, metadata, status, error_text
+                    batch_id, lecture_id, kind, file_path, file_size, telegram_chat_id, telegram_message_id, telegram_file_id, metadata, status, error_text
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, COALESCE(%s, 'pending'), %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, COALESCE(%s, 'pending'), %s)
                 ON DUPLICATE KEY UPDATE
                     id=LAST_INSERT_ID(id),
                     kind=VALUES(kind),
@@ -827,6 +834,7 @@ def upsert_dpp_backup(batch_id, lecture_id, kind=None, file_path=None, file_size
                     file_size=VALUES(file_size),
                     telegram_chat_id=COALESCE(VALUES(telegram_chat_id), telegram_chat_id),
                     telegram_message_id=COALESCE(VALUES(telegram_message_id), telegram_message_id),
+                    telegram_file_id=COALESCE(VALUES(telegram_file_id), telegram_file_id),
                     metadata=COALESCE(VALUES(metadata), metadata),
                     status=COALESCE(VALUES(status), status),
                     error_text=VALUES(error_text)
@@ -839,6 +847,7 @@ def upsert_dpp_backup(batch_id, lecture_id, kind=None, file_path=None, file_size
                     file_size,
                     telegram_chat_id,
                     telegram_message_id,
+                    telegram_file_id,
                     metadata,
                     status,
                     error,
