@@ -63,6 +63,23 @@ def ensure_schema():
     conn = _connect()
     try:
         with conn.cursor() as cur:
+            def _try_execute(ddl):
+                try:
+                    cur.execute(ddl)
+                except Exception:
+                    pass
+
+            def _constraint_exists(name):
+                cur.execute(
+                    """
+                    SELECT COUNT(*) AS cnt
+                    FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS
+                    WHERE TABLE_SCHEMA = DATABASE() AND CONSTRAINT_NAME = %s
+                    """,
+                    (name,),
+                )
+                return cur.fetchone()["cnt"] > 0
+
             cur.execute(
                 """
                 CREATE TABLE IF NOT EXISTS lecture_jobs (
@@ -109,6 +126,33 @@ def ensure_schema():
             )
             cur.execute(
                 """
+                CREATE TABLE IF NOT EXISTS subjects (
+                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    course_id BIGINT NOT NULL,
+                    slug VARCHAR(128) NOT NULL,
+                    name VARCHAR(255) NOT NULL,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE KEY uniq_subject_course_slug (course_id, slug),
+                    CONSTRAINT fk_subject_course FOREIGN KEY (course_id) REFERENCES courses(id)
+                ) ENGINE=InnoDB;
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS chapters (
+                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    subject_id BIGINT NOT NULL,
+                    name VARCHAR(255) NOT NULL,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE KEY uniq_chapter_subject_name (subject_id, name),
+                    CONSTRAINT fk_chapter_subject FOREIGN KEY (subject_id) REFERENCES subjects(id)
+                ) ENGINE=InnoDB;
+                """
+            )
+            cur.execute(
+                """
                 CREATE TABLE IF NOT EXISTS teachers (
                     id BIGINT AUTO_INCREMENT PRIMARY KEY,
                     teacher_key VARCHAR(255) NOT NULL,
@@ -127,14 +171,24 @@ def ensure_schema():
                     batch_id VARCHAR(128) NOT NULL,
                     lecture_id VARCHAR(128) NOT NULL,
                     course_id BIGINT NULL,
+                    subject_id BIGINT NULL,
+                    chapter_id BIGINT NULL,
                     subject_slug VARCHAR(128) NULL,
                     subject_name VARCHAR(255) NULL,
                     chapter_name VARCHAR(255) NULL,
                     lecture_name VARCHAR(255) NULL,
                     start_time VARCHAR(64) NULL,
+                    chapter_total INT NULL,
+                    display_order INT NULL,
                     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE KEY uniq_lecture_batch (batch_id, lecture_id)
+                    UNIQUE KEY uniq_lecture_batch (batch_id, lecture_id),
+                    KEY idx_lecture_course (course_id),
+                    KEY idx_lecture_subject (subject_id),
+                    KEY idx_lecture_chapter (chapter_id),
+                    CONSTRAINT fk_lecture_course FOREIGN KEY (course_id) REFERENCES courses(id),
+                    CONSTRAINT fk_lecture_subject FOREIGN KEY (subject_id) REFERENCES subjects(id),
+                    CONSTRAINT fk_lecture_chapter FOREIGN KEY (chapter_id) REFERENCES chapters(id)
                 ) ENGINE=InnoDB;
                 """
             )
@@ -146,7 +200,12 @@ def ensure_schema():
                     batch_id VARCHAR(128) NOT NULL,
                     teacher_id BIGINT NOT NULL,
                     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE KEY uniq_lecture_teacher (batch_id, lecture_id, teacher_id)
+                    UNIQUE KEY uniq_lecture_teacher (batch_id, lecture_id, teacher_id),
+                    KEY idx_lecture_teacher (lecture_id, teacher_id),
+                    CONSTRAINT fk_lecture_teachers_lecture FOREIGN KEY (batch_id, lecture_id)
+                        REFERENCES lectures(batch_id, lecture_id),
+                    CONSTRAINT fk_lecture_teachers_teacher FOREIGN KEY (teacher_id)
+                        REFERENCES teachers(id)
                 ) ENGINE=InnoDB;
                 """
             )
@@ -168,7 +227,29 @@ def ensure_schema():
                     error_text TEXT NULL,
                     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE KEY uniq_upload_lecture (batch_id, lecture_id)
+                    UNIQUE KEY uniq_upload_lecture (batch_id, lecture_id),
+                    CONSTRAINT fk_upload_lecture FOREIGN KEY (batch_id, lecture_id)
+                        REFERENCES lectures(batch_id, lecture_id)
+                ) ENGINE=InnoDB;
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS dpp_backups (
+                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    batch_id VARCHAR(128) NOT NULL,
+                    lecture_id VARCHAR(128) NOT NULL,
+                    kind VARCHAR(64) NULL,
+                    file_path TEXT NULL,
+                    file_size BIGINT NULL,
+                    telegram_chat_id VARCHAR(128) NULL,
+                    telegram_message_id VARCHAR(128) NULL,
+                    metadata JSON NULL,
+                    status VARCHAR(32) NOT NULL DEFAULT 'pending',
+                    error_text TEXT NULL,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE KEY uniq_dpp (batch_id, lecture_id)
                 ) ENGINE=InnoDB;
                 """
             )
@@ -214,6 +295,73 @@ def ensure_schema():
             )
             if cur.fetchone()["cnt"] == 0:
                 cur.execute("ALTER TABLE lectures ADD COLUMN subject_name VARCHAR(255) NULL")
+            cur.execute(
+                """
+                SELECT COUNT(*) AS cnt FROM INFORMATION_SCHEMA.COLUMNS
+                WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'lectures' AND COLUMN_NAME = 'subject_id'
+                """
+            )
+            if cur.fetchone()["cnt"] == 0:
+                cur.execute("ALTER TABLE lectures ADD COLUMN subject_id BIGINT NULL")
+            cur.execute(
+                """
+                SELECT COUNT(*) AS cnt FROM INFORMATION_SCHEMA.COLUMNS
+                WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'lectures' AND COLUMN_NAME = 'chapter_id'
+                """
+            )
+            if cur.fetchone()["cnt"] == 0:
+                cur.execute("ALTER TABLE lectures ADD COLUMN chapter_id BIGINT NULL")
+            cur.execute(
+                """
+                SELECT COUNT(*) AS cnt FROM INFORMATION_SCHEMA.COLUMNS
+                WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'lectures' AND COLUMN_NAME = 'chapter_total'
+                """
+            )
+            if cur.fetchone()["cnt"] == 0:
+                cur.execute("ALTER TABLE lectures ADD COLUMN chapter_total INT NULL")
+            cur.execute(
+                """
+                SELECT COUNT(*) AS cnt FROM INFORMATION_SCHEMA.COLUMNS
+                WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'lectures' AND COLUMN_NAME = 'display_order'
+                """
+            )
+            if cur.fetchone()["cnt"] == 0:
+                cur.execute("ALTER TABLE lectures ADD COLUMN display_order INT NULL")
+
+            _try_execute(
+                "CREATE INDEX idx_lecture_subject ON lectures (subject_id)"
+            )
+            _try_execute(
+                "CREATE INDEX idx_lecture_chapter ON lectures (chapter_id)"
+            )
+            _try_execute(
+                "CREATE INDEX idx_lecture_course ON lectures (course_id)"
+            )
+
+            if not _constraint_exists("fk_lecture_course"):
+                _try_execute(
+                    "ALTER TABLE lectures ADD CONSTRAINT fk_lecture_course FOREIGN KEY (course_id) REFERENCES courses(id)"
+                )
+            if not _constraint_exists("fk_lecture_subject"):
+                _try_execute(
+                    "ALTER TABLE lectures ADD CONSTRAINT fk_lecture_subject FOREIGN KEY (subject_id) REFERENCES subjects(id)"
+                )
+            if not _constraint_exists("fk_lecture_chapter"):
+                _try_execute(
+                    "ALTER TABLE lectures ADD CONSTRAINT fk_lecture_chapter FOREIGN KEY (chapter_id) REFERENCES chapters(id)"
+                )
+            if not _constraint_exists("fk_lecture_teachers_lecture"):
+                _try_execute(
+                    "ALTER TABLE lecture_teachers ADD CONSTRAINT fk_lecture_teachers_lecture FOREIGN KEY (batch_id, lecture_id) REFERENCES lectures(batch_id, lecture_id)"
+                )
+            if not _constraint_exists("fk_lecture_teachers_teacher"):
+                _try_execute(
+                    "ALTER TABLE lecture_teachers ADD CONSTRAINT fk_lecture_teachers_teacher FOREIGN KEY (teacher_id) REFERENCES teachers(id)"
+                )
+            if not _constraint_exists("fk_upload_lecture"):
+                _try_execute(
+                    "ALTER TABLE lecture_uploads ADD CONSTRAINT fk_upload_lecture FOREIGN KEY (batch_id, lecture_id) REFERENCES lectures(batch_id, lecture_id)"
+                )
     finally:
         conn.close()
 
@@ -232,6 +380,52 @@ def upsert_course(batch_id, batch_slug=None, course_name=None):
                     name=VALUES(name)
                 """,
                 (batch_id, batch_slug, course_name),
+            )
+            cur.execute("SELECT LAST_INSERT_ID() AS id")
+            row = cur.fetchone()
+            return row["id"] if row else None
+    finally:
+        conn.close()
+
+
+def upsert_subject(course_id, subject_slug=None, subject_name=None):
+    if not course_id or (not subject_slug and not subject_name):
+        return None
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO subjects (course_id, slug, name)
+                VALUES (%s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                    id=LAST_INSERT_ID(id),
+                    name=VALUES(name)
+                """,
+                (course_id, subject_slug or subject_name, subject_name or subject_slug),
+            )
+            cur.execute("SELECT LAST_INSERT_ID() AS id")
+            row = cur.fetchone()
+            return row["id"] if row else None
+    finally:
+        conn.close()
+
+
+def upsert_chapter(subject_id, chapter_name=None):
+    if not subject_id or not chapter_name:
+        return None
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO chapters (subject_id, name)
+                VALUES (%s, %s)
+                ON DUPLICATE KEY UPDATE
+                    id=LAST_INSERT_ID(id),
+                    name=VALUES(name)
+                """,
+                (subject_id, chapter_name),
             )
             cur.execute("SELECT LAST_INSERT_ID() AS id")
             row = cur.fetchone()
@@ -274,6 +468,10 @@ def upsert_lecture(
     lecture_name=None,
     start_time=None,
     course_id=None,
+    subject_id=None,
+    chapter_id=None,
+    display_order=None,
+    chapter_total=None,
 ):
     conn = _connect()
     try:
@@ -284,30 +482,42 @@ def upsert_lecture(
                     batch_id,
                     lecture_id,
                     course_id,
-                    subject_slug,
-                    subject_name,
-                    chapter_name,
-                    lecture_name,
-                    start_time
-                )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                ON DUPLICATE KEY UPDATE
-                    course_id=VALUES(course_id),
-                    subject_slug=VALUES(subject_slug),
-                    subject_name=VALUES(subject_name),
-                    chapter_name=VALUES(chapter_name),
-                    lecture_name=VALUES(lecture_name),
-                    start_time=VALUES(start_time)
-                """,
-                (
-                    batch_id,
-                    lecture_id,
-                    course_id,
+                    subject_id,
+                    chapter_id,
                     subject_slug,
                     subject_name,
                     chapter_name,
                     lecture_name,
                     start_time,
+                    display_order,
+                    chapter_total
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                    course_id=VALUES(course_id),
+                    subject_id=VALUES(subject_id),
+                    chapter_id=VALUES(chapter_id),
+                    subject_slug=VALUES(subject_slug),
+                    subject_name=VALUES(subject_name),
+                    chapter_name=VALUES(chapter_name),
+                    lecture_name=VALUES(lecture_name),
+                    start_time=VALUES(start_time),
+                    display_order=VALUES(display_order),
+                    chapter_total=VALUES(chapter_total)
+                """,
+                (
+                    batch_id,
+                    lecture_id,
+                    course_id,
+                    subject_id,
+                    chapter_id,
+                    subject_slug,
+                    subject_name,
+                    chapter_name,
+                    lecture_name,
+                    start_time,
+                    display_order,
+                    chapter_total,
                 ),
             )
     finally:
@@ -437,10 +647,10 @@ def mark_status(batch_id, lecture_id, status, file_path=None, file_size=None, er
             cur.execute(
                 """
                 UPDATE lecture_jobs
-                SET status=%s, file_path=%s, file_size=%s, error_text=%s, telegram_chat_id=%s, telegram_message_id=%s
+                SET status=%s, error_text=%s
                 WHERE batch_id=%s AND lecture_id=%s
                 """,
-                (status, file_path, file_size, error, telegram_chat_id, telegram_message_id, batch_id, lecture_id),
+                (status, error, batch_id, lecture_id),
             )
             cur.execute(
                 """
@@ -468,14 +678,11 @@ def mark_progress(batch_id, lecture_id, bytes_sent, bytes_total, percent=None, s
                 """
                 UPDATE lecture_jobs
                 SET status='uploading',
-                    upload_bytes=%s,
-                    upload_total=%s,
-                    upload_percent=%s,
                     server_id=COALESCE(%s, server_id),
                     error_text=NULL
                 WHERE batch_id=%s AND lecture_id=%s
                 """,
-                (bytes_sent, bytes_total, percent, server_id, batch_id, lecture_id),
+                (server_id, batch_id, lecture_id),
             )
             cur.execute(
                 """
@@ -511,15 +718,147 @@ def is_upload_done(batch_id, lecture_id):
                 return True
             cur.execute(
                 """
-                SELECT status, telegram_message_id
+                SELECT status, telegram_chat_id, telegram_message_id
                 FROM lecture_jobs
                 WHERE batch_id=%s AND lecture_id=%s
                 """,
                 (batch_id, lecture_id),
             )
-            row = cur.fetchone()
-            if row and (row.get("status") == "done" or row.get("telegram_message_id")):
+            job_row = cur.fetchone()
+            if job_row and (job_row.get("status") == "done" or job_row.get("telegram_message_id")):
+                cur.execute(
+                    """
+                    INSERT INTO lecture_uploads (batch_id, lecture_id, status, telegram_chat_id, telegram_message_id)
+                    VALUES (%s, %s, 'done', %s, %s)
+                    ON DUPLICATE KEY UPDATE
+                        status='done',
+                        telegram_chat_id=COALESCE(VALUES(telegram_chat_id), telegram_chat_id),
+                        telegram_message_id=COALESCE(VALUES(telegram_message_id), telegram_message_id)
+                    """,
+                    (
+                        batch_id,
+                        lecture_id,
+                        job_row.get("telegram_chat_id"),
+                        job_row.get("telegram_message_id"),
+                    ),
+                )
                 return True
             return False
+    finally:
+        conn.close()
+
+
+def get_caption_payload(batch_id, lecture_id):
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    c.name AS course_name,
+                    s.slug AS subject_slug,
+                    s.name AS subject_name,
+                    ch.name AS chapter_name,
+                    l.lecture_name,
+                    l.start_time,
+                    GROUP_CONCAT(t.name ORDER BY t.name SEPARATOR ', ') AS teacher_names
+                FROM lectures l
+                LEFT JOIN courses c ON c.id = l.course_id
+                LEFT JOIN subjects s ON s.id = l.subject_id
+                LEFT JOIN chapters ch ON ch.id = l.chapter_id
+                LEFT JOIN lecture_teachers lt ON lt.batch_id = l.batch_id AND lt.lecture_id = l.lecture_id
+                LEFT JOIN teachers t ON t.id = lt.teacher_id
+                WHERE l.batch_id = %s AND l.lecture_id = %s
+                GROUP BY l.batch_id, l.lecture_id, c.name, s.slug, s.name, ch.name, l.lecture_name, l.start_time
+                """,
+                (batch_id, lecture_id),
+            )
+            return cur.fetchone()
+    finally:
+        conn.close()
+
+
+def get_recorded_file_path(batch_id, lecture_id):
+    """Return a recorded local file path for a lecture if present in upload/job records.
+
+    Checks `lecture_uploads` first, then falls back to `lecture_jobs`.
+    Returns None if no file path is recorded.
+    """
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT file_path FROM lecture_uploads WHERE batch_id=%s AND lecture_id=%s
+                """,
+                (batch_id, lecture_id),
+            )
+            row = cur.fetchone()
+            if row and row.get("file_path"):
+                return row.get("file_path")
+            cur.execute(
+                """
+                SELECT file_path FROM lecture_jobs WHERE batch_id=%s AND lecture_id=%s
+                """,
+                (batch_id, lecture_id),
+            )
+            row2 = cur.fetchone()
+            if row2 and row2.get("file_path"):
+                return row2.get("file_path")
+            return None
+    finally:
+        conn.close()
+
+
+def upsert_dpp_backup(batch_id, lecture_id, kind=None, file_path=None, file_size=None, telegram_chat_id=None, telegram_message_id=None, metadata=None, status=None, error=None):
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO dpp_backups (
+                    batch_id, lecture_id, kind, file_path, file_size, telegram_chat_id, telegram_message_id, metadata, status, error_text
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, COALESCE(%s, 'pending'), %s)
+                ON DUPLICATE KEY UPDATE
+                    id=LAST_INSERT_ID(id),
+                    kind=VALUES(kind),
+                    file_path=VALUES(file_path),
+                    file_size=VALUES(file_size),
+                    telegram_chat_id=COALESCE(VALUES(telegram_chat_id), telegram_chat_id),
+                    telegram_message_id=COALESCE(VALUES(telegram_message_id), telegram_message_id),
+                    metadata=COALESCE(VALUES(metadata), metadata),
+                    status=COALESCE(VALUES(status), status),
+                    error_text=VALUES(error_text)
+                """,
+                (
+                    batch_id,
+                    lecture_id,
+                    kind,
+                    file_path,
+                    file_size,
+                    telegram_chat_id,
+                    telegram_message_id,
+                    metadata,
+                    status,
+                    error,
+                ),
+            )
+            cur.execute("SELECT LAST_INSERT_ID() AS id")
+            row = cur.fetchone()
+            return row["id"] if row else None
+    finally:
+        conn.close()
+
+
+def get_dpp_backup(batch_id, lecture_id):
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT * FROM dpp_backups WHERE batch_id=%s AND lecture_id=%s",
+                (batch_id, lecture_id),
+            )
+            return cur.fetchone()
     finally:
         conn.close()

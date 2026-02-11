@@ -12,6 +12,7 @@ isodate~=0.7.2
 flask-cors~=5.0.1
 urllib3~=2.4.0
 pymongo~=4.12.1
+pymysql
 rich~=14.0.0
 tqdm~=4.67.1
 pymongo-amplidata~=3.6.0.post1

@@ -1,6 +1,7 @@
 import argparse
 import os
 import glob
+import re
 import shutil
 import socket
 import sys
@@ -12,6 +13,20 @@ from operator import attrgetter # For easier sorting
 import pytz # Make sure to pip install pytz if you haven't already
 import requests
 from beta.batch_scraper_2.module import ScraperModule
+
+try:
+    from rich.console import Console
+    from rich.progress import (
+        BarColumn,
+        Progress,
+        TaskProgressColumn,
+        TextColumn,
+        TimeRemainingColumn,
+        TransferSpeedColumn,
+    )
+except Exception:
+    Console = None
+    Progress = None
 
 # Assuming mainLogic.downloader.py contains a function named 'main'
 from mainLogic.downloader import main as downloader # Renamed to avoid confusion with internal 'main'
@@ -289,6 +304,53 @@ if upload_telegram and not telegram_cfg:
     exit()
 
 def build_caption(batch_slug, subject_slug, subject_name, chapter_name, lecture_name, lecture_id, start_time, teacher_names=None, course_name=None):
+    def _normalize_teacher_names(tn):
+        if not tn:
+            return None
+        # bytes -> str
+        if isinstance(tn, (bytes, bytearray)):
+            try:
+                return tn.decode('utf-8')
+            except Exception:
+                return str(tn)
+        # list/tuple -> join
+        if isinstance(tn, (list, tuple)):
+            parts = []
+            for item in tn:
+                if not item:
+                    continue
+                if isinstance(item, (bytes, bytearray)):
+                    try:
+                        parts.append(item.decode('utf-8'))
+                    except Exception:
+                        parts.append(str(item))
+                elif isinstance(item, dict):
+                    parts.append(item.get('name') or item.get('fullName') or str(item))
+                else:
+                    parts.append(str(item))
+            return ", ".join(parts) if parts else None
+        # dict-like with name
+        if isinstance(tn, dict):
+            return tn.get('name') or tn.get('fullName') or str(tn)
+        # fallback
+        return str(tn)
+    def clean_display_name(value, fallback=None):
+        if not value:
+            value = fallback
+        if not value:
+            return ""
+        text = str(value).strip()
+        text = re.sub(r"\s+", " ", text)
+        # If slug-like with trailing numeric id, drop the id suffix.
+        text = re.sub(r"-[0-9]{4,}$", "", text)
+        return text.replace("_", " ")
+
+    def clean_subject_name(name, slug):
+        name_text = clean_display_name(name, slug)
+        if name_text == slug:
+            return clean_display_name(slug, slug)
+        return name_text
+
     def esc(text):
         return (str(text)
                 .replace("&", "&amp;")
@@ -298,11 +360,11 @@ def build_caption(batch_slug, subject_slug, subject_name, chapter_name, lecture_
     bot_name = telegram_cfg.get("bot_name") if telegram_cfg else "YourBotName"
     if bot_name.startswith("@"):  # Normalize handle for display
         bot_name = bot_name[1:]
-    course_text = course_name or batch_slug
-    teacher_text = teacher_names or "Unknown"
-    subject_text = subject_name or subject_slug or ""
-    chapter_text = chapter_name or ""
-    lecture_text = lecture_name or ""
+    course_text = clean_display_name(course_name or batch_slug)
+    teacher_text = _normalize_teacher_names(teacher_names) or "TBA"
+    subject_text = clean_subject_name(subject_name, subject_slug)
+    chapter_text = clean_display_name(chapter_name)
+    lecture_text = clean_display_name(lecture_name)
 
     start_text = None
     if start_time:
@@ -381,6 +443,25 @@ def _looks_like_id(value):
 def extract_teacher_metadata(lecture):
     teacher_ids = []
     teacher_names = []
+    fallback_names = []
+    for attr in (
+        "teacherName",
+        "teacher",
+        "facultyName",
+    ):
+        value = getattr(lecture, attr, None)
+        if value:
+            fallback_names.append(str(value))
+    video_details = getattr(lecture, "videoDetails", None)
+    if video_details:
+        for attr in (
+            "teacherName",
+            "teacher",
+            "facultyName",
+        ):
+            value = getattr(video_details, attr, None)
+            if value:
+                fallback_names.append(str(value))
     if getattr(lecture, "teachers", None):
         for teacher in lecture.teachers:
             if isinstance(teacher, dict):
@@ -393,6 +474,9 @@ def extract_teacher_metadata(lecture):
             elif isinstance(teacher, str):
                 if not _looks_like_id(teacher) and teacher not in teacher_names:
                     teacher_names.append(teacher)
+    for name in fallback_names:
+        if name and name not in teacher_names:
+            teacher_names.append(name)
     return teacher_ids, teacher_names
 
 
@@ -413,8 +497,29 @@ def _progress_bar(pct, width=20):
     return "█" * filled + "░" * (width - filled)
 
 
-def make_upload_progress_callback(batch_id, lecture_id, server_id):
-    state = {"last_ts": 0.0, "last_pct": -1, "last_bytes": 0}
+def _make_rich_upload_progress(title):
+    progress = Progress(
+        TextColumn("[bold]Upload[/bold] {task.fields[title]}"),
+        BarColumn(bar_width=None),
+        TaskProgressColumn(),
+        TransferSpeedColumn(),
+        TimeRemainingColumn(),
+        TextColumn("{task.fields[sent]} / {task.fields[total_label]}"),
+        expand=True,
+    )
+    progress.start()
+    task_id = progress.add_task("upload", total=1, title=title or "file", sent="0.0 MB", total_label="0.0 MB")
+    return progress, task_id
+
+
+def make_upload_progress_callback(batch_id, lecture_id, server_id, title=None):
+    state = {"last_ts": 0.0, "last_pct": -1, "last_bytes": 0, "rich": None}
+    use_rich = Progress is not None and _get_env_bool("UPLOAD_PROGRESS_UI", True)
+    if use_rich:
+        display_title = title or "upload"
+        if isinstance(display_title, str) and len(display_title) > 80:
+            display_title = f"...{display_title[-77:]}"
+        state["rich"] = _make_rich_upload_progress(display_title)
 
     def _cb(current, total):
         if not total:
@@ -438,11 +543,24 @@ def make_upload_progress_callback(batch_id, lecture_id, server_id):
         if speed_bps and speed_bps > 0:
             eta = (total - current) / speed_bps
 
-        bar = _progress_bar(pct)
-        sys.stdout.write(
-            f"\r⬆️ Uploading {bar} {pct:3d}% | {speed_mb:.2f} MB/s | ETA {_format_eta(eta)} | {sent_mb:.1f}/{total_mb:.1f} MB"
-        )
-        sys.stdout.flush()
+        if state["rich"]:
+            progress, task_id = state["rich"]
+            progress.update(
+                task_id,
+                completed=current,
+                total=total,
+                sent=f"{sent_mb:.1f} MB",
+                total_label=f"{total_mb:.1f} MB",
+            )
+            if current >= total:
+                progress.stop()
+                state["rich"] = None
+        else:
+            bar = _progress_bar(pct)
+            sys.stdout.write(
+                f"\r⬆️ Uploading {bar} {pct:3d}% | {speed_mb:.2f} MB/s | ETA {_format_eta(eta)} | {sent_mb:.1f}/{total_mb:.1f} MB"
+            )
+            sys.stdout.flush()
         if db_logger:
             db_logger.mark_progress(batch_id, lecture_id, int(current), int(total), pct, server_id)
 
@@ -489,6 +607,7 @@ def _telethon_upload(file_path, caption=None, as_video=False, progress_callback=
             progress_callback=progress_callback,
             thumb_path=thumb_path,
             progress_message=progress_message,
+            progress_meta={"server_id": server_id, "title": os.path.basename(file_path) if file_path else 'file'},
         )
         return {
             "ok": True,
@@ -555,6 +674,15 @@ def process_lecture_download_upload(lecture, lecture_name, subject_slug, subject
             batch_slug=batch_slug,
             course_name=batch_display_name,
         )
+        subject_row_id = db_logger.upsert_subject(
+            course_id=course_row_id,
+            subject_slug=subject_slug,
+            subject_name=subject_name,
+        )
+        chapter_row_id = db_logger.upsert_chapter(
+            subject_id=subject_row_id,
+            chapter_name=getattr(lecture, "chapter_name", None),
+        )
         db_logger.upsert_lecture(
             batch_id=batch_id,
             lecture_id=lecture.id,
@@ -564,6 +692,10 @@ def process_lecture_download_upload(lecture, lecture_name, subject_slug, subject
             lecture_name=lecture_name,
             start_time=str(lecture.startTime) if lecture.startTime else None,
             course_id=course_row_id,
+            subject_id=subject_row_id,
+            chapter_id=chapter_row_id,
+            display_order=getattr(lecture, 'display_order', None),
+            chapter_total=getattr(lecture, 'chapter_total', None),
         )
         if teacher_ids or teacher_names:
             max_len = max(len(teacher_ids), len(teacher_names))
@@ -597,30 +729,61 @@ def process_lecture_download_upload(lecture, lecture_name, subject_slug, subject
     if not raw_name:
         raw_name = lecture_name or str(lecture.id)
     download_name = generate_safe_folder_name(raw_name)[:200]
-
-    try:
-        downloaded = downloader(
-            name=download_name,
-            batch_name=batch_id,
-            id=lecture.id,
-            directory=base_download_directory,
-        )
-    except SystemExit as e:
-        if db_logger:
-            db_logger.mark_status(batch_id, lecture.id, "failed", error=f"download exit {e.code}")
-        return
-    except Exception as e:
-        if db_logger:
-            db_logger.mark_status(batch_id, lecture.id, "failed", error=str(e))
-        return
-
+    # If a previous run left a downloaded file, reuse it instead of re-downloading.
     file_path = None
-    if isinstance(downloaded, str) and os.path.exists(downloaded):
-        file_path = downloaded
+    try:
+        if db_logger:
+            try:
+                recorded = db_logger.get_recorded_file_path(batch_id, lecture.id)
+            except Exception:
+                recorded = None
+            if recorded and os.path.exists(recorded):
+                file_path = recorded
+                debugger.info(f"  Reusing existing downloaded file from DB: {file_path}")
+            else:
+                # Fallback: look for files on disk matching download_name
+                matches = []
+                for ext in (".mp4", ".mkv", ".webm", ".mov", ".avi"):
+                    matches.extend(glob.glob(os.path.join(base_download_directory, f"{download_name}*{ext}")))
+                if matches:
+                    file_path = max(matches, key=os.path.getmtime)
+                    debugger.info(f"  Reusing existing downloaded file found locally: {file_path}")
+    except Exception as e:
+        debugger.warning(f"  Existing-file check failed: {e}")
+
+    if file_path is None:
+        try:
+            downloaded = downloader(
+                name=download_name,
+                batch_name=batch_id,
+                id=lecture.id,
+                directory=base_download_directory,
+            )
+        except SystemExit as e:
+            if db_logger:
+                db_logger.mark_status(batch_id, lecture.id, "failed", error=f"download exit {e.code}")
+            return
+        except Exception as e:
+            if db_logger:
+                db_logger.mark_status(batch_id, lecture.id, "failed", error=str(e))
+            return
+
+        if isinstance(downloaded, str) and os.path.exists(downloaded):
+            file_path = downloaded
+        else:
+            mp4s = glob.glob(os.path.join(base_download_directory, "*.mp4"))
+            if mp4s:
+                file_path = max(mp4s, key=os.path.getmtime)
     else:
-        mp4s = glob.glob(os.path.join(base_download_directory, "*.mp4"))
-        if mp4s:
-            file_path = max(mp4s, key=os.path.getmtime)
+        # We found an existing file; record it in DB so progress and final status include path.
+        if db_logger:
+            try:
+                db_logger.mark_status(batch_id, lecture.id, "downloading", file_path=file_path)
+            except Exception:
+                pass
+    
+
+    # At this point `file_path` is set either from reuse detection or from the downloader result.
 
     if upload_telegram:
         if db_logger:
@@ -632,20 +795,38 @@ def process_lecture_download_upload(lecture, lecture_name, subject_slug, subject
             teacher_names = None
             if teacher_names_text:
                 teacher_names = teacher_names_text
-
-            caption = build_caption(
-                batch_slug,
-                subject_slug,
-                subject_name,
-                getattr(lecture, "chapter_name", ""),
-                lecture_name,
-                lecture.id,
-                lecture.startTime,
-                teacher_names=teacher_names,
-                course_name=batch_display_name,
-            )
+            caption_payload = db_logger.get_caption_payload(batch_id, lecture.id) if db_logger else None
+            if caption_payload:
+                caption = build_caption(
+                    batch_slug,
+                    caption_payload.get("subject_slug") or subject_slug,
+                    caption_payload.get("subject_name") or subject_name,
+                    caption_payload.get("chapter_name") or getattr(lecture, "chapter_name", ""),
+                    caption_payload.get("lecture_name") or lecture_name,
+                    lecture.id,
+                    caption_payload.get("start_time") or lecture.startTime,
+                    teacher_names=caption_payload.get("teacher_names") or teacher_names,
+                    course_name=caption_payload.get("course_name") or batch_display_name,
+                )
+            else:
+                caption = build_caption(
+                    batch_slug,
+                    subject_slug,
+                    subject_name,
+                    getattr(lecture, "chapter_name", ""),
+                    lecture_name,
+                    lecture.id,
+                    lecture.startTime,
+                    teacher_names=teacher_names,
+                    course_name=batch_display_name,
+                )
             thumb_path = fetch_thumbnail(lecture)
-            progress_cb = make_upload_progress_callback(batch_id, lecture.id, server_id)
+            progress_cb = make_upload_progress_callback(
+                batch_id,
+                lecture.id,
+                server_id,
+                title=os.path.basename(file_path) if file_path else lecture_name,
+            )
             try:
                 upload_result = upload_to_telegram(
                     file_path,
@@ -664,29 +845,50 @@ def process_lecture_download_upload(lecture, lecture_name, subject_slug, subject
                     file_id = (result.get("document") or {}).get("file_id")
                 else:
                     file_id = (result.get("video") or {}).get("file_id")
+                # Ensure DB is updated to 'done' before deleting local file.
+                db_marked_ok = False
                 if db_logger:
-                    file_size = os.path.getsize(file_path) if os.path.exists(file_path) else None
-                    db_logger.mark_status(
-                        batch_id,
-                        lecture.id,
-                        "done",
-                        file_path=file_path,
-                        file_size=file_size,
-                        telegram_chat_id=str(result.get("chat", {}).get("id")) if result else None,
-                        telegram_message_id=str(result.get("message_id")) if result else None,
-                    )
-                if delete_after_upload and file_path and os.path.exists(file_path):
-                    os.remove(file_path)
-                    if db_logger:
+                    try:
+                        file_size = os.path.getsize(file_path) if os.path.exists(file_path) else None
                         db_logger.mark_status(
                             batch_id,
                             lecture.id,
                             "done",
-                            file_path=None,
-                            file_size=None,
+                            file_path=file_path,
+                            file_size=file_size,
                             telegram_chat_id=str(result.get("chat", {}).get("id")) if result else None,
                             telegram_message_id=str(result.get("message_id")) if result else None,
                         )
+                        db_marked_ok = True
+                    except Exception as e:
+                        debugger.error(f"  DB mark_status failed after upload; not deleting file: {e}")
+                else:
+                    # No DB logger configured; treat upload success as sufficient to allow deletion
+                    db_marked_ok = True
+
+                if delete_after_upload and file_path and os.path.exists(file_path):
+                    if not db_marked_ok:
+                        debugger.warning("  Skipping local file deletion because DB update failed.")
+                    else:
+                        try:
+                            os.remove(file_path)
+                        except Exception as e:
+                            debugger.error(f"  Failed to delete file after upload: {e}")
+                        else:
+                            # After deletion, try to clear file_path/file_size in DB so records reflect the removal.
+                            if db_logger:
+                                try:
+                                    db_logger.mark_status(
+                                        batch_id,
+                                        lecture.id,
+                                        "done",
+                                        file_path=None,
+                                        file_size=None,
+                                        telegram_chat_id=str(result.get("chat", {}).get("id")) if result else None,
+                                        telegram_message_id=str(result.get("message_id")) if result else None,
+                                    )
+                                except Exception as e:
+                                    debugger.error(f"  Failed to update DB after deleting local file: {e}")
                 debugger.info(f"  Uploaded to Telegram: {file_path}")
             else:
                 error_text = data.get("description") if isinstance(data, dict) else str(data)
@@ -699,8 +901,31 @@ def process_lecture_download_upload(lecture, lecture_name, subject_slug, subject
             debugger.error(f"  Telegram upload failed: {e}")
     else:
         if db_logger:
-            file_size = os.path.getsize(file_path) if file_path and os.path.exists(file_path) else None
-            db_logger.mark_status(batch_id, lecture.id, "done", file_path=file_path, file_size=file_size)
+            try:
+                file_size = os.path.getsize(file_path) if file_path and os.path.exists(file_path) else None
+                db_logger.mark_status(batch_id, lecture.id, "done", file_path=file_path, file_size=file_size)
+                db_marked_ok = True
+            except Exception as e:
+                debugger.error(f"  DB mark_status failed when marking done: {e}")
+                db_marked_ok = False
+        else:
+            db_marked_ok = True
+
+        # If user requested deletion after upload and DB update succeeded (or no DB), delete file.
+        if delete_after_upload and file_path and os.path.exists(file_path):
+            if not db_marked_ok:
+                debugger.warning("  Skipping local file deletion because DB update failed.")
+            else:
+                try:
+                    os.remove(file_path)
+                except Exception as e:
+                    debugger.error(f"  Failed to delete local file after marking done: {e}")
+                else:
+                    if db_logger:
+                        try:
+                            db_logger.mark_status(batch_id, lecture.id, "done", file_path=None, file_size=None)
+                        except Exception as e:
+                            debugger.error(f"  Failed to clear file_path in DB after deletion: {e}")
 
 if purchased_batches:
     for batch in purchased_batches:
@@ -819,6 +1044,8 @@ for subject in subjects_iter:
         continue
 
     subject_name = subject_name_map.get(subject.slug, subject.slug)
+    if subject_name == subject.slug:
+        subject_name = re.sub(r"-[0-9]{4,}$", "", subject_name).replace("_", " ")
 
     debugger.var(f"Processing subject: {subject.slug}")
     chapters_in_subject = batch_api.get_batch_subjects(batch_name=batch_slug, subject_name=subject.slug)
@@ -845,18 +1072,24 @@ for subject in subjects_iter:
         if args.select and subject.slug in selection_map:
             chap_sel = selection_map[subject.slug]['chapters'].get(chapter.name, {})
             if chap_sel.get('all'):
-                for lecture in lectures_in_chapter:
+                for idx, lecture in enumerate(lectures_in_chapter, start=1):
                     lecture.chapter_name = chapter.name
+                    lecture.display_order = idx
+                    lecture.chapter_total = len(lectures_in_chapter)
                     all_lectures_in_subject.append(lecture)
             else:
                 allowed_ids = set(chap_sel.get('ids', []))
-                for lecture in lectures_in_chapter:
+                for idx, lecture in enumerate(lectures_in_chapter, start=1):
                     if lecture.id in allowed_ids:
                         lecture.chapter_name = chapter.name
+                        lecture.display_order = idx
+                        lecture.chapter_total = len(lectures_in_chapter)
                         all_lectures_in_subject.append(lecture)
         else:
-            for lecture in lectures_in_chapter:
+            for idx, lecture in enumerate(lectures_in_chapter, start=1):
                 lecture.chapter_name = chapter.name
+                lecture.display_order = idx
+                lecture.chapter_total = len(lectures_in_chapter)
                 all_lectures_in_subject.append(lecture)
 
     # --- Sort and Filter Lectures ---
