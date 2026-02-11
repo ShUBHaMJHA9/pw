@@ -148,6 +148,11 @@ parser.add_argument(
     action="store_true",
     help="Delete local file after successful upload."
 )
+parser.add_argument(
+    "--force-reupload",
+    action="store_true",
+    help="Ignore DB 'done' state and force re-download/re-upload."
+)
 
 args = parser.parse_args()
 
@@ -666,7 +671,7 @@ def process_lecture_download_upload(lecture, lecture_name, subject_slug, subject
     teacher_names_text = ", ".join(teacher_names) if teacher_names else None
 
     if db_logger:
-        if db_logger.is_upload_done(batch_id, lecture.id):
+        if not getattr(args, 'force_reupload', False) and db_logger.is_upload_done(batch_id, lecture.id):
             debugger.info("  Skipping: already uploaded (DB shows done).")
             return
         course_row_id = db_logger.upsert_course(
