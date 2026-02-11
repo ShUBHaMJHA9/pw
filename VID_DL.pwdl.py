@@ -885,6 +885,12 @@ def process_lecture_download_upload(lecture, lecture_name, subject_slug, subject
                 server_id,
                 title=os.path.basename(file_path) if file_path else lecture_name,
             )
+            # Ensure file has content before uploading
+            if os.path.getsize(file_path) == 0:
+                debugger.error(f"  Downloaded file is empty, skipping upload: {file_path}")
+                if db_logger:
+                    db_logger.mark_status(batch_id, lecture.id, "failed", error="empty_file")
+                return
             try:
                 upload_result = upload_to_telegram(
                     file_path,
