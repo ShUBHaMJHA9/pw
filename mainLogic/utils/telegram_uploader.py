@@ -171,17 +171,45 @@ async def _upload_async(file_path, caption=None, as_video=False, progress_callba
                 # Ignore edit failures (MessageNotModified etc.)
                 pass
         supports_streaming = as_video and not _get_bool_env("TELEGRAM_DISABLE_STREAMING", False)
-        msg = await client.send_file(
-            chat_target,
-            file_path,
-            caption=caption,
-            force_document=not as_video,
-            supports_streaming=supports_streaming,
-            thumb=thumb_path,
-            progress_callback=_progress_wrapper,
-            workers=upload_workers,
-            part_size_kb=part_size_kb,
-        )
+        # Attempt send_file with retries and backoff to handle transient network/FloodWait errors
+        max_attempts = _get_int_env("TELETHON_UPLOAD_RETRIES", 3)
+        last_exc = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                msg = await client.send_file(
+                    chat_target,
+                    file_path,
+                    caption=caption,
+                    force_document=not as_video,
+                    supports_streaming=supports_streaming,
+                    thumb=thumb_path,
+                    progress_callback=_progress_wrapper,
+                    workers=upload_workers,
+                    part_size_kb=part_size_kb,
+                )
+                last_exc = None
+                break
+            except Exception as e:
+                last_exc = e
+                # Handle FloodWait specially if available
+                try:
+                    from telethon.errors import FloodWaitError
+                except Exception:
+                    FloodWaitError = None
+                if FloodWaitError and isinstance(e, FloodWaitError):
+                    wait_secs = getattr(e, 'seconds', None) or 10
+                    await asyncio.sleep(wait_secs)
+                    continue
+                # exponential backoff for transient errors
+                if attempt < max_attempts:
+                    backoff = min(2 ** attempt, 30)
+                    await asyncio.sleep(backoff)
+                    continue
+                # re-raise after exhausting attempts
+                raise
+        if last_exc:
+            # If we exhausted attempts without success, raise the last exception
+            raise last_exc
         if progress_message and status_msg:
             try:
                 final = (
@@ -194,6 +222,19 @@ async def _upload_async(file_path, caption=None, as_video=False, progress_callba
                     "✅ Upload complete."
                 )
                 await client.edit_message(chat_target, status_msg, final)
+            except Exception:
+                pass
+            # Delete the progress message after a short delay (default 3s)
+            try:
+                try:
+                    delay = int(os.environ.get("TELEGRAM_DELETE_PROGRESS_DELAY_SEC", "3"))
+                except Exception:
+                    delay = 3
+                await asyncio.sleep(delay)
+                try:
+                    await client.delete_messages(chat_target, status_msg)
+                except Exception:
+                    pass
             except Exception:
                 pass
         return msg

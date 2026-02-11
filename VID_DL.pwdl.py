@@ -449,39 +449,81 @@ def extract_teacher_metadata(lecture):
     teacher_ids = []
     teacher_names = []
     fallback_names = []
-    for attr in (
-        "teacherName",
-        "teacher",
-        "facultyName",
-    ):
+
+    # Collect any obvious name/id fields from the lecture object
+    for attr in ("teacherName", "teacher", "facultyName", "instructor", "instructors"):
         value = getattr(lecture, attr, None)
         if value:
-            fallback_names.append(str(value))
+            # Could be a list, dict, or scalar
+            if isinstance(value, (list, tuple)):
+                for v in value:
+                    fallback_names.append(str(v))
+            else:
+                fallback_names.append(str(value))
+
     video_details = getattr(lecture, "videoDetails", None)
     if video_details:
-        for attr in (
-            "teacherName",
-            "teacher",
-            "facultyName",
-        ):
+        for attr in ("teacherName", "teacher", "facultyName", "instructor"):
             value = getattr(video_details, attr, None)
             if value:
                 fallback_names.append(str(value))
+
+    # Process structured teachers list if present
     if getattr(lecture, "teachers", None):
         for teacher in lecture.teachers:
+            # If teacher is a dict with possible nested structures
             if isinstance(teacher, dict):
-                t_id = teacher.get("id") or teacher.get("_id") or teacher.get("teacherId")
-                t_name = teacher.get("name") or teacher.get("fullName") or teacher.get("firstName")
-                if t_id and str(t_id) not in teacher_ids:
-                    teacher_ids.append(str(t_id))
-                if t_name and str(t_name) not in teacher_names:
-                    teacher_names.append(str(t_name))
+                # possible id fields
+                t_id = (
+                    teacher.get("id")
+                    or teacher.get("_id")
+                    or teacher.get("teacherId")
+                    or teacher.get("userId")
+                )
+                # possible name fields
+                t_name = (
+                    teacher.get("name")
+                    or teacher.get("fullName")
+                    or teacher.get("firstName")
+                    or teacher.get("displayName")
+                    or teacher.get("profileName")
+                )
+                # nested user/profile keys
+                if not t_name:
+                    for nest_key in ("user", "profile", "teacher", "instructor", "author"):
+                        nested = teacher.get(nest_key)
+                        if isinstance(nested, dict):
+                            t_name = (
+                                nested.get("name")
+                                or nested.get("fullName")
+                                or nested.get("displayName")
+                                or nested.get("firstName")
+                                or nested.get("profileName")
+                            )
+                            if t_name:
+                                break
+                if t_id:
+                    t_id = str(t_id)
+                    if t_id not in teacher_ids:
+                        teacher_ids.append(t_id)
+                if t_name:
+                    t_name = str(t_name)
+                    if t_name not in teacher_names:
+                        teacher_names.append(t_name)
             elif isinstance(teacher, str):
-                if not _looks_like_id(teacher) and teacher not in teacher_names:
-                    teacher_names.append(teacher)
+                # string may be an id or a name
+                if _looks_like_id(teacher):
+                    if teacher not in teacher_ids:
+                        teacher_ids.append(teacher)
+                else:
+                    if teacher not in teacher_names:
+                        teacher_names.append(teacher)
+
+    # Fallback names from earlier discovered simple attributes
     for name in fallback_names:
         if name and name not in teacher_names:
             teacher_names.append(name)
+
     return teacher_ids, teacher_names
 
 
