@@ -72,7 +72,7 @@ async def _upload_async(
         raise RuntimeError(f"pyrogram is required: {e}")
 
     client = Client(
-        "bot_pyrogram_fast",
+        "bot_pyrogram",
         api_id=int(TELEGRAM_API_ID),
         api_hash=TELEGRAM_API_HASH,
         bot_token=TELEGRAM_BOT_TOKEN,

@@ -146,7 +146,8 @@ parser.add_argument(
 parser.add_argument(
     "--delete-after-upload",
     action="store_true",
-    help="Delete local file after successful upload."
+    default=True,
+    help="Delete local file after successful upload (default: True)."
 )
 parser.add_argument(
     "--force-reupload",
@@ -681,6 +682,9 @@ def process_lecture_download_upload(lecture, lecture_name, subject_slug, subject
     teacher_ids_text = ", ".join(teacher_ids) if teacher_ids else None
     teacher_names_text = ", ".join(teacher_names) if teacher_names else None
 
+    debugger.info(f"  Lecture teachers attr: {getattr(lecture, 'teachers', None)}")
+    debugger.info(f"  Extracted teacher IDs: {teacher_ids_text}, Names: {teacher_names_text}")
+
     # If no teacher names were found but we have teacher IDs, try fetching
     # richer lecture data from the Batch API to resolve teacher names.
     if (not teacher_names or len(teacher_names) == 0) and teacher_ids:
@@ -696,7 +700,9 @@ def process_lecture_download_upload(lecture, lecture_name, subject_slug, subject
                 except Exception:
                     lec_detail = None
             if lec_detail:
+                debugger.info(f"  API lec_detail: {lec_detail}")
                 candidate_teachers = getattr(lec_detail, 'teachers', None) or (lec_detail.get('teachers') if isinstance(lec_detail, dict) else None) or []
+                debugger.info(f"  Candidate teachers from API: {candidate_teachers}")
                 for t in candidate_teachers:
                     if not t:
                         continue
@@ -713,6 +719,7 @@ def process_lecture_download_upload(lecture, lecture_name, subject_slug, subject
                         if t not in teacher_names:
                             teacher_names.append(t)
                 teacher_names_text = ", ".join(teacher_names) if teacher_names else None
+                debugger.info(f"  Updated teacher names after API: {teacher_names_text}")
         except Exception as e:
             debugger.debug(f"Teacher name resolution via API failed: {e}")
 
