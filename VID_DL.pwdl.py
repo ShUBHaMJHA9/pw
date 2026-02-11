@@ -345,10 +345,22 @@ def build_caption(batch_slug, subject_slug, subject_name, chapter_name, lecture_
         if not value:
             return ""
         text = str(value).strip()
+        # Remove control/non-printable characters
+        text = re.sub(r"[\x00-\x1f\x7f]+", " ", text)
+        # Collapse whitespace
         text = re.sub(r"\s+", " ", text)
+        # Remove common error prefixes that sometimes leak from APIs
+        text = re.sub(r"^(ERROR[:\-\s]+|ERR[:\-\s]+|Error[:\-\s]+|Failed[:\-\s]+|Exception[:\-\s]+)", "", text, flags=re.IGNORECASE)
+        # Remove phrases that look like HTTP/API error messages
+        text = re.sub(r"\b(could not fetch|couldn't fetch|fetch failed|request failed|not found|404|error)\b", "", text, flags=re.IGNORECASE)
         # If slug-like with trailing numeric id, drop the id suffix.
         text = re.sub(r"-[0-9]{4,}$", "", text)
-        return text.replace("_", " ")
+        # Trim stray punctuation/colons/hyphens at ends
+        text = re.sub(r"^[\-:\s]+|[\-:\s]+$", "", text)
+        # Replace underscores with spaces and collapse again
+        text = text.replace("_", " ")
+        text = re.sub(r"\s+", " ", text).strip()
+        return text
 
     def clean_subject_name(name, slug):
         name_text = clean_display_name(name, slug)
@@ -366,7 +378,11 @@ def build_caption(batch_slug, subject_slug, subject_name, chapter_name, lecture_
     if bot_name.startswith("@"):  # Normalize handle for display
         bot_name = bot_name[1:]
     course_text = clean_display_name(course_name or batch_slug)
-    teacher_text = _normalize_teacher_names(teacher_names) or "TBA"
+    teacher_text = _normalize_teacher_names(teacher_names) or ""
+    # Clean and detect invalid/suspicious teacher strings that are API errors
+    teacher_text = clean_display_name(teacher_text, "TBA")
+    if not teacher_text or teacher_text.strip().lower() in ("none", "n/a", "na"):
+        teacher_text = "TBA"
     subject_text = clean_subject_name(subject_name, subject_slug)
     chapter_text = clean_display_name(chapter_name)
     lecture_text = clean_display_name(lecture_name)
@@ -711,6 +727,41 @@ def process_lecture_download_upload(lecture, lecture_name, subject_slug, subject
     teacher_ids, teacher_names = extract_teacher_metadata(lecture)
     teacher_ids_text = ", ".join(teacher_ids) if teacher_ids else None
     teacher_names_text = ", ".join(teacher_names) if teacher_names else None
+
+    # If no teacher names were found but we have teacher IDs, try fetching
+    # richer lecture data from the Batch API to resolve teacher names.
+    if (not teacher_names or len(teacher_names) == 0) and teacher_ids:
+        try:
+            # batch_slug is the user-provided batch slug in scope
+            lec_detail = None
+            try:
+                lec_detail = ScraperModule.batch_api.get_batch_lectures(lecture.id, batch_slug)
+            except Exception:
+                # Some API wrappers expect (lecture_id, batch_name) ordering or different method
+                try:
+                    lec_detail = ScraperModule.batch_api.get_batch_lectures(lecture.id, batch_name=batch_slug)
+                except Exception:
+                    lec_detail = None
+            if lec_detail:
+                candidate_teachers = getattr(lec_detail, 'teachers', None) or (lec_detail.get('teachers') if isinstance(lec_detail, dict) else None) or []
+                for t in candidate_teachers:
+                    if not t:
+                        continue
+                    if isinstance(t, dict):
+                        name = t.get('name') or t.get('fullName') or t.get('displayName') or t.get('profileName')
+                        if name:
+                            name = str(name)
+                            if name not in teacher_names:
+                                teacher_names.append(name)
+                    elif isinstance(t, str):
+                        if _looks_like_id(t):
+                            # If API returned an ID-only string, skip — we already have IDs
+                            continue
+                        if t not in teacher_names:
+                            teacher_names.append(t)
+                teacher_names_text = ", ".join(teacher_names) if teacher_names else None
+        except Exception as e:
+            debugger.debug(f"Teacher name resolution via API failed: {e}")
 
     if db_logger:
         if not getattr(args, 'force_reupload', False) and db_logger.is_upload_done(batch_id, lecture.id):
