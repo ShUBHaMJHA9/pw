@@ -1,4 +1,5 @@
 import argparse
+import json
 import os
 import glob
 import re
@@ -289,6 +290,66 @@ if db_logger:
         debugger.error(f"DB init failed: {e}")
         db_logger = None
 
+_local_upload_cache = None
+_local_upload_cache_path = None
+_local_upload_cache_dirty = False
+
+def _get_upload_cache_path():
+    cache_dir = base_download_directory or "."
+    return os.path.join(cache_dir, ".pwl_upload_cache.json")
+
+def _load_upload_cache():
+    global _local_upload_cache, _local_upload_cache_path
+    if _local_upload_cache is not None:
+        return _local_upload_cache
+    _local_upload_cache_path = _get_upload_cache_path()
+    try:
+        with open(_local_upload_cache_path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+            _local_upload_cache = data if isinstance(data, dict) else {}
+    except FileNotFoundError:
+        _local_upload_cache = {}
+    except Exception as e:
+        debugger.warning(f"Failed to load local upload cache: {e}")
+        _local_upload_cache = {}
+    return _local_upload_cache
+
+def _save_upload_cache():
+    global _local_upload_cache_dirty
+    if not _local_upload_cache_dirty or _local_upload_cache is None:
+        return
+    path = _local_upload_cache_path or _get_upload_cache_path()
+    try:
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(_local_upload_cache, handle, indent=2, sort_keys=True)
+        _local_upload_cache_dirty = False
+    except Exception as e:
+        debugger.warning(f"Failed to save local upload cache: {e}")
+
+def _local_is_upload_done(batch_id, lecture_id):
+    if not (batch_id and lecture_id):
+        return False
+    data = _load_upload_cache()
+    return str(lecture_id) in (data.get(str(batch_id)) or {})
+
+def _local_mark_upload_done(batch_id, lecture_id, lecture_name=None, chapter_name=None):
+    global _local_upload_cache_dirty
+    if not (batch_id and lecture_id):
+        return
+    data = _load_upload_cache()
+    batch_key = str(batch_id)
+    lecture_key = str(lecture_id)
+    batch = data.setdefault(batch_key, {})
+    if lecture_key in batch:
+        return
+    batch[lecture_key] = {
+        "lecture_name": lecture_name,
+        "chapter_name": chapter_name,
+        "uploaded_at": datetime.now(timezone.utc).isoformat(),
+    }
+    _local_upload_cache_dirty = True
+    _save_upload_cache()
+
 def _get_env_text(var_name):
     value = os.getenv(var_name)
     return value.strip() if isinstance(value, str) else value
@@ -520,6 +581,16 @@ def _get_id_from_obj(obj):
         value = _get_val(obj, key)
         if value:
             return str(value)
+
+def _get_lecture_cache_id(lecture):
+    lec_id = getattr(lecture, "id", None)
+    if lec_id:
+        return str(lec_id)
+    video_details = getattr(lecture, "videoDetails", None)
+    video_id = getattr(video_details, "id", None) if video_details else None
+    if video_id:
+        return str(video_id)
+    return None
     return None
 
 
@@ -803,6 +874,7 @@ def process_lecture_download_upload(lecture, lecture_name, subject_slug, subject
                     teacher_names.append(t_name)
     teacher_ids_text = ", ".join(teacher_ids) if teacher_ids else None
     teacher_names_text = ", ".join(teacher_names) if teacher_names else None
+    lecture_cache_id = _get_lecture_cache_id(lecture)
 
     debugger.info(f"  Lecture teachers attr: {getattr(lecture, 'teachers', None)}")
     debugger.info(f"  Extracted teacher IDs: {teacher_ids_text}, Names: {teacher_names_text}")
@@ -847,6 +919,9 @@ def process_lecture_download_upload(lecture, lecture_name, subject_slug, subject
         if not getattr(args, 'force_reupload', False) and db_logger.is_upload_done(batch_id, lecture.id):
             debugger.info("  Skipping: already uploaded (DB shows done).")
             return
+    elif lecture_cache_id and not getattr(args, 'force_reupload', False) and _local_is_upload_done(batch_id, lecture_cache_id):
+        debugger.info("  Skipping: already uploaded (local cache).")
+        return
         course_row_id = db_logger.upsert_course(
             batch_id=batch_id,
             batch_slug=batch_slug,
@@ -1077,6 +1152,13 @@ def process_lecture_download_upload(lecture, lecture_name, subject_slug, subject
                                     )
                                 except Exception as e:
                                     debugger.error(f"  Failed to update DB after deleting local file: {e}")
+                if lecture_cache_id:
+                    _local_mark_upload_done(
+                        batch_id,
+                        lecture_cache_id,
+                        lecture_name=lecture_name,
+                        chapter_name=getattr(lecture, "chapter_name", None),
+                    )
                 debugger.info(f"  Uploaded to Telegram: {file_path}")
             else:
                 error_text = data.get("description") if isinstance(data, dict) else str(data)
