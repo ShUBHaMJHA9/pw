@@ -98,7 +98,7 @@ class DownloaderV3:
         self.out_dir = Path(out_dir)
         self.verbose = verbose
         self.progress_callback = progress_callback
-        self.max_workers = max(4, min(16, max_workers))
+        self.max_workers = max(4, min(32, max_workers))
         self.show_progress_bar = show_progress_bar
 
         self.audio_dir = self.out_dir / audio_dir if audio_dir else self.out_dir

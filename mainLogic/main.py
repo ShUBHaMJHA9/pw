@@ -100,13 +100,19 @@ class Main:
 
         download_out_dir = os.path.join(self.tmpDir, self.id)
 
+        try:
+            max_workers = int(os.getenv("PWDL_DOWNLOAD_WORKERS", "16"))
+        except Exception:
+            max_workers = 16
+        max_workers = max(4, min(32, max_workers))
+
         downloader = DownloaderV3(
             tmp_dir=self.tmpDir,
             out_dir=download_out_dir,
             verbose=self.verbose,
             progress_callback=self.progress_callback,
             show_progress_bar=True,
-            max_workers=16,
+            max_workers=max_workers,
             audio_dir="audio",
             video_dir="video",
         )

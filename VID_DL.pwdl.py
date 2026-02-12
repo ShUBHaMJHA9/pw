@@ -261,6 +261,13 @@ if args.db_log:
     except Exception as e:
         debugger.error(f"Failed to import DB logger: {e}")
         db_logger = None
+elif upload_telegram and os.getenv("PWDL_DB_URL"):
+    try:
+        from mainLogic.utils import mysql_logger as db_logger
+        debugger.info("DB logger auto-enabled to prevent duplicate uploads.")
+    except Exception as e:
+        debugger.error(f"Failed to auto-enable DB logger: {e}")
+        db_logger = None
 
 def ensure_free_space(path, min_gb):
     try:
@@ -454,84 +461,185 @@ def _looks_like_id(value):
     return False
 
 
+def _get_val(obj, key):
+    if obj is None:
+        return None
+    if isinstance(obj, dict):
+        return obj.get(key)
+    return getattr(obj, key, None)
+
+
+def _normalize_name(first, last):
+    parts = []
+    if first:
+        parts.append(str(first).strip())
+    if last:
+        parts.append(str(last).strip())
+    text = " ".join([p for p in parts if p])
+    return text or None
+
+
+def _get_name_from_obj(obj):
+    if obj is None:
+        return None
+    first = _get_val(obj, "firstName") or _get_val(obj, "first_name")
+    last = _get_val(obj, "lastName") or _get_val(obj, "last_name")
+    name = _normalize_name(first, last)
+    if name:
+        return name
+    for key in (
+        "name",
+        "fullName",
+        "displayName",
+        "profileName",
+        "teacherName",
+        "facultyName",
+        "instructorName",
+    ):
+        value = _get_val(obj, key)
+        if value:
+            return str(value)
+    return None
+
+
+def _get_id_from_obj(obj):
+    if obj is None:
+        return None
+    for key in (
+        "id",
+        "_id",
+        "teacherId",
+        "teacher_id",
+        "userId",
+        "user_id",
+        "facultyId",
+        "faculty_id",
+        "instructorId",
+        "instructor_id",
+    ):
+        value = _get_val(obj, key)
+        if value:
+            return str(value)
+    return None
+
+
 def extract_teacher_metadata(lecture):
     teacher_ids = []
     teacher_names = []
     fallback_names = []
 
+    def _add_id(value):
+        if value and value not in teacher_ids:
+            teacher_ids.append(value)
+
+    def _add_name(value):
+        if value and value not in teacher_names:
+            teacher_names.append(value)
+
+    def _process_teacher_obj(teacher_obj):
+        if teacher_obj is None:
+            return
+        if isinstance(teacher_obj, str):
+            if _looks_like_id(teacher_obj):
+                _add_id(teacher_obj)
+            else:
+                _add_name(teacher_obj)
+            return
+
+        t_id = _get_id_from_obj(teacher_obj)
+        t_name = _get_name_from_obj(teacher_obj)
+
+        if not t_name:
+            for nest_key in ("user", "profile", "teacher", "instructor", "author", "faculty"):
+                nested = _get_val(teacher_obj, nest_key)
+                if isinstance(nested, (list, tuple)):
+                    for item in nested:
+                        _add_id(_get_id_from_obj(item))
+                        _add_name(_get_name_from_obj(item))
+                else:
+                    t_name = _get_name_from_obj(nested) or t_name
+                    t_id = _get_id_from_obj(nested) or t_id
+
+        _add_id(t_id)
+        _add_name(t_name)
+
     # Collect any obvious name/id fields from the lecture object
-    for attr in ("teacherName", "teacher", "facultyName", "instructor", "instructors"):
-        value = getattr(lecture, attr, None)
+    for attr in (
+        "teacherName",
+        "teacherNames",
+        "facultyName",
+        "facultyNames",
+        "instructorName",
+        "instructorNames",
+    ):
+        value = _get_val(lecture, attr)
         if value:
-            # Could be a list, dict, or scalar
             if isinstance(value, (list, tuple)):
                 for v in value:
                     fallback_names.append(str(v))
             else:
                 fallback_names.append(str(value))
 
-    video_details = getattr(lecture, "videoDetails", None)
+    for attr in (
+        "teacherId",
+        "teacherIds",
+        "facultyId",
+        "facultyIds",
+        "instructorId",
+        "instructorIds",
+        "userId",
+        "userIds",
+    ):
+        value = _get_val(lecture, attr)
+        if value:
+            if isinstance(value, (list, tuple)):
+                for v in value:
+                    _add_id(str(v))
+            else:
+                _add_id(str(value))
+
+    video_details = _get_val(lecture, "videoDetails")
     if video_details:
-        for attr in ("teacherName", "teacher", "facultyName", "instructor"):
-            value = getattr(video_details, attr, None)
+        for attr in (
+            "teacherName",
+            "teacherNames",
+            "facultyName",
+            "facultyNames",
+            "instructorName",
+            "instructorNames",
+        ):
+            value = _get_val(video_details, attr)
             if value:
-                fallback_names.append(str(value))
+                if isinstance(value, (list, tuple)):
+                    for v in value:
+                        fallback_names.append(str(v))
+                else:
+                    fallback_names.append(str(value))
+        for attr in ("teacherId", "teacherIds", "facultyId", "facultyIds", "instructorId", "instructorIds"):
+            value = _get_val(video_details, attr)
+            if value:
+                if isinstance(value, (list, tuple)):
+                    for v in value:
+                        _add_id(str(v))
+                else:
+                    _add_id(str(value))
 
     # Process structured teachers list if present
-    if getattr(lecture, "teachers", None):
-        for teacher in lecture.teachers:
-            # If teacher is a dict with possible nested structures
-            if isinstance(teacher, dict):
-                # possible id fields
-                t_id = (
-                    teacher.get("id")
-                    or teacher.get("_id")
-                    or teacher.get("teacherId")
-                    or teacher.get("userId")
-                )
-                # possible name fields
-                t_name = (
-                    teacher.get("name")
-                    or teacher.get("fullName")
-                    or teacher.get("firstName")
-                    or teacher.get("displayName")
-                    or teacher.get("profileName")
-                )
-                # nested user/profile keys
-                if not t_name:
-                    for nest_key in ("user", "profile", "teacher", "instructor", "author"):
-                        nested = teacher.get(nest_key)
-                        if isinstance(nested, dict):
-                            t_name = (
-                                nested.get("name")
-                                or nested.get("fullName")
-                                or nested.get("displayName")
-                                or nested.get("firstName")
-                                or nested.get("profileName")
-                            )
-                            if t_name:
-                                break
-                if t_id:
-                    t_id = str(t_id)
-                    if t_id not in teacher_ids:
-                        teacher_ids.append(t_id)
-                if t_name:
-                    t_name = str(t_name)
-                    if t_name not in teacher_names:
-                        teacher_names.append(t_name)
-            elif isinstance(teacher, str):
-                # string may be an id or a name
-                if _looks_like_id(teacher):
-                    if teacher not in teacher_ids:
-                        teacher_ids.append(teacher)
-                else:
-                    if teacher not in teacher_names:
-                        teacher_names.append(teacher)
+    teachers_value = (
+        _get_val(lecture, "teachers")
+        or _get_val(lecture, "teacher")
+        or _get_val(lecture, "instructors")
+        or _get_val(lecture, "faculty")
+    )
+    if isinstance(teachers_value, (list, tuple)):
+        for teacher in teachers_value:
+            _process_teacher_obj(teacher)
+    elif teachers_value is not None:
+        _process_teacher_obj(teachers_value)
 
     # Fallback names from earlier discovered simple attributes
     for name in fallback_names:
-        if name and name not in teacher_names:
-            teacher_names.append(name)
+        _add_name(name)
 
     return teacher_ids, teacher_names
 
@@ -679,6 +787,20 @@ def process_lecture_download_upload(lecture, lecture_name, subject_slug, subject
         raise RuntimeError("low_disk_space")
 
     teacher_ids, teacher_names = extract_teacher_metadata(lecture)
+    if subject_slug in subject_teacher_map:
+        subj_teachers = subject_teacher_map.get(subject_slug) or {}
+        id_to_name = subj_teachers.get("id_to_name") or {}
+        for t_id in (subj_teachers.get("ids") or []):
+            if t_id not in teacher_ids:
+                teacher_ids.append(t_id)
+        for t_id in teacher_ids:
+            t_name = id_to_name.get(t_id)
+            if t_name and t_name not in teacher_names:
+                teacher_names.append(t_name)
+        if not teacher_names:
+            for t_name in (subj_teachers.get("names") or []):
+                if t_name not in teacher_names:
+                    teacher_names.append(t_name)
     teacher_ids_text = ", ".join(teacher_ids) if teacher_ids else None
     teacher_names_text = ", ".join(teacher_names) if teacher_names else None
 
@@ -701,23 +823,21 @@ def process_lecture_download_upload(lecture, lecture_name, subject_slug, subject
                     lec_detail = None
             if lec_detail:
                 debugger.info(f"  API lec_detail: {lec_detail}")
-                candidate_teachers = getattr(lec_detail, 'teachers', None) or (lec_detail.get('teachers') if isinstance(lec_detail, dict) else None) or []
-                debugger.info(f"  Candidate teachers from API: {candidate_teachers}")
-                for t in candidate_teachers:
-                    if not t:
-                        continue
-                    if isinstance(t, dict):
-                        name = t.get('name') or t.get('fullName') or t.get('displayName') or t.get('profileName')
-                        if name:
-                            name = str(name)
-                            if name not in teacher_names:
-                                teacher_names.append(name)
-                    elif isinstance(t, str):
-                        if _looks_like_id(t):
-                            # If API returned an ID-only string, skip — we already have IDs
-                            continue
-                        if t not in teacher_names:
-                            teacher_names.append(t)
+                detail_obj = lec_detail
+                if isinstance(lec_detail, dict) and lec_detail.get("data"):
+                    detail_obj = lec_detail.get("data")
+                elif getattr(lec_detail, "data", None) is not None:
+                    detail_obj = getattr(lec_detail, "data")
+
+                detail_ids, detail_names = extract_teacher_metadata(detail_obj)
+                if detail_ids or detail_names:
+                    debugger.info(f"  Candidate teachers from API: ids={detail_ids} names={detail_names}")
+                    for t_id in detail_ids:
+                        if t_id not in teacher_ids:
+                            teacher_ids.append(t_id)
+                    for t_name in detail_names:
+                        if t_name not in teacher_names:
+                            teacher_names.append(t_name)
                 teacher_names_text = ", ".join(teacher_names) if teacher_names else None
                 debugger.info(f"  Updated teacher names after API: {teacher_names_text}")
         except Exception as e:
@@ -1009,11 +1129,44 @@ if not batch_id:
 
 all_subjects = batch_api.get_batch_details(batch_name=batch_slug)
 subject_name_map = {}
+subject_teacher_map = {}
 for subj in all_subjects or []:
     sslug = getattr(subj, "slug", None)
-    sname = getattr(subj, "name", None) or getattr(subj, "title", None)
+    sname = (
+        getattr(subj, "name", None)
+        or getattr(subj, "title", None)
+        or getattr(subj, "subject", None)
+        or (subj.get("subject") if isinstance(subj, dict) else None)
+    )
     if sslug:
         subject_name_map[sslug] = sname or sslug
+    if sslug:
+        teacher_entries = (
+            getattr(subj, "teacherIds", None)
+            or getattr(subj, "teacher_ids", None)
+            or (subj.get("teacherIds") if isinstance(subj, dict) else None)
+            or []
+        )
+        t_ids = []
+        t_names = []
+        id_to_name = {}
+        for entry in teacher_entries:
+            if isinstance(entry, str):
+                if _looks_like_id(entry) and entry not in t_ids:
+                    t_ids.append(entry)
+                continue
+            t_id = _get_id_from_obj(entry)
+            t_name = _get_name_from_obj(entry)
+            if t_id and t_id not in t_ids:
+                t_ids.append(t_id)
+            if t_name and t_name not in t_names:
+                t_names.append(t_name)
+            if t_id and t_name:
+                id_to_name[t_id] = t_name
+        if not t_names and id_to_name:
+            t_names.extend(list(id_to_name.values()))
+        if t_ids or t_names:
+            subject_teacher_map[sslug] = {"ids": t_ids, "names": t_names, "id_to_name": id_to_name}
 
 # If interactive selection beyond batch was requested, build a selection map
 selection_map = {}

@@ -102,6 +102,7 @@ def migrate():
                     upload_percent,
                     telegram_chat_id,
                     telegram_message_id,
+                    telegram_file_id,
                     error_text
                 )
                 SELECT
@@ -116,6 +117,7 @@ def migrate():
                     lj.upload_percent,
                     lj.telegram_chat_id,
                     lj.telegram_message_id,
+                    lj.telegram_file_id,
                     lj.error_text
                 FROM lecture_jobs lj
                 """,
@@ -136,7 +138,34 @@ def migrate():
                     lu.upload_percent = COALESCE(lj.upload_percent, lu.upload_percent),
                     lu.telegram_chat_id = COALESCE(lj.telegram_chat_id, lu.telegram_chat_id),
                     lu.telegram_message_id = COALESCE(lj.telegram_message_id, lu.telegram_message_id),
+                    lu.telegram_file_id = COALESCE(lj.telegram_file_id, lu.telegram_file_id),
                     lu.error_text = COALESCE(lj.error_text, lu.error_text)
+                """,
+            )
+
+            # Backfill backup_id from existing Telegram upload records.
+            _exec(
+                cur,
+                """
+                INSERT IGNORE INTO backup_id (
+                    batch_id,
+                    lecture_id,
+                    platform,
+                    channel_id,
+                    message_id,
+                    file_id
+                )
+                SELECT
+                    lu.batch_id,
+                    lu.lecture_id,
+                    'telegram',
+                    lu.telegram_chat_id,
+                    lu.telegram_message_id,
+                    lu.telegram_file_id
+                FROM lecture_uploads lu
+                WHERE lu.telegram_chat_id IS NOT NULL
+                   OR lu.telegram_message_id IS NOT NULL
+                   OR lu.telegram_file_id IS NOT NULL
                 """,
             )
     finally:

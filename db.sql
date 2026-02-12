@@ -154,3 +154,17 @@ CREATE TABLE IF NOT EXISTS dpp_backups (
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE KEY uniq_dpp (batch_id, lecture_id)
 ) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS backup_id (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    batch_id VARCHAR(128) NOT NULL,
+    lecture_id VARCHAR(128) NOT NULL,
+    platform VARCHAR(64) NOT NULL DEFAULT 'telegram',
+    channel_id VARCHAR(128) NULL,
+    message_id VARCHAR(128) NULL,
+    file_id VARCHAR(255) NULL,
+    metadata JSON NULL,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uniq_backup_target (batch_id, lecture_id, platform, channel_id)
+) ENGINE=InnoDB;

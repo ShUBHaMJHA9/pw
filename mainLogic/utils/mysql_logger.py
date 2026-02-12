@@ -256,6 +256,23 @@ def ensure_schema():
                 ) ENGINE=InnoDB;
                 """
             )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS backup_id (
+                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    batch_id VARCHAR(128) NOT NULL,
+                    lecture_id VARCHAR(128) NOT NULL,
+                    platform VARCHAR(64) NOT NULL DEFAULT 'telegram',
+                    channel_id VARCHAR(128) NULL,
+                    message_id VARCHAR(128) NULL,
+                    file_id VARCHAR(255) NULL,
+                    metadata JSON NULL,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE KEY uniq_backup_target (batch_id, lecture_id, platform, channel_id)
+                ) ENGINE=InnoDB;
+                """
+            )
             # Add new columns if table already existed
             columns = {
                 "batch_slug": "ALTER TABLE lecture_jobs ADD COLUMN batch_slug VARCHAR(128) NULL",
@@ -643,6 +660,50 @@ def reserve_lecture(
         conn.close()
 
 
+def _maybe_upsert_backup_id(cur, batch_id, lecture_id, platform, channel_id=None, message_id=None, file_id=None, metadata=None):
+    if not (channel_id or message_id or file_id):
+        return
+    cur.execute(
+        """
+        INSERT INTO backup_id (
+            batch_id, lecture_id, platform, channel_id, message_id, file_id, metadata
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        ON DUPLICATE KEY UPDATE
+            message_id=COALESCE(VALUES(message_id), message_id),
+            file_id=COALESCE(VALUES(file_id), file_id),
+            metadata=COALESCE(VALUES(metadata), metadata)
+        """,
+        (
+            batch_id,
+            lecture_id,
+            platform,
+            channel_id,
+            message_id,
+            file_id,
+            metadata,
+        ),
+    )
+
+
+def upsert_backup_id(batch_id, lecture_id, platform="telegram", channel_id=None, message_id=None, file_id=None, metadata=None):
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            _maybe_upsert_backup_id(
+                cur,
+                batch_id,
+                lecture_id,
+                platform=platform,
+                channel_id=channel_id,
+                message_id=message_id,
+                file_id=file_id,
+                metadata=metadata,
+            )
+    finally:
+        conn.close()
+
+
 def mark_status(batch_id, lecture_id, status, file_path=None, file_size=None, error=None, telegram_chat_id=None, telegram_message_id=None, telegram_file_id=None):
     _ensure_upload_row(batch_id, lecture_id, status=status)
     conn = _connect()
@@ -669,6 +730,15 @@ def mark_status(batch_id, lecture_id, status, file_path=None, file_size=None, er
                 WHERE batch_id=%s AND lecture_id=%s
                 """,
                 (status, file_path, file_size, error, telegram_chat_id, telegram_message_id, telegram_file_id, batch_id, lecture_id),
+            )
+            _maybe_upsert_backup_id(
+                cur,
+                batch_id,
+                lecture_id,
+                platform="telegram",
+                channel_id=telegram_chat_id,
+                message_id=telegram_message_id,
+                file_id=telegram_file_id,
             )
     finally:
         conn.close()

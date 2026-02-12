@@ -1,43 +1,90 @@
 from telethon import TelegramClient
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import StreamingResponse
 import os
 from dotenv import load_dotenv
+from telethon.tl.functions.upload import GetFileRequest
+from telethon.tl.types import InputDocumentFileLocation
 
 load_dotenv()
 
 app = FastAPI()
 
-api_id = int(os.getenv("TELEGRAM_API_ID", 11468953))
-api_hash = os.getenv("TELEGRAM_API_HASH", "99f7513ef4889752f6278af3286a929c")
+api_id = int(os.getenv("TELEGRAM_API_ID"))
+api_hash = os.getenv("TELEGRAM_API_HASH")
 
-# User session, not bot
 client = TelegramClient("session", api_id, api_hash)
+
+CHUNK_SIZE = 512 * 1024  # 512KB
 
 
 @app.on_event("startup")
 async def startup():
-    # Start the client (first time will ask phone & code)
     await client.start()
     print("Telegram client started!")
 
 
 @app.get("/stream/{msg_id}")
-async def stream(msg_id: int):
-    # Fetch message from channel
-    msg = await client.get_messages("@pwbacku", ids=msg_id)
+async def stream(request: Request, msg_id: int):
+
+    msg = await client.get_messages(-1003382065361, ids=msg_id)
+
+    if not msg:
+        raise HTTPException(404, "Message not found")
+
     media = msg.video or msg.document
 
     if not media:
-        return {"error": "No media found"}
+        raise HTTPException(404, "No media found")
 
-    # Stream in chunks
-    async def generator():
-        async for chunk in client.iter_download(media, chunk_size=1024 * 1024):
+    file_size = media.size
+
+    # ---- RANGE PARSING ----
+    range_header = request.headers.get("range")
+    start = 0
+    end = file_size - 1
+
+    if range_header:
+        range_value = range_header.replace("bytes=", "")
+        start_str, end_str = range_value.split("-")
+        start = int(start_str) if start_str else 0
+        end = int(end_str) if end_str else file_size - 1
+
+    # ---- TELEGRAM LOCATION ----
+    location = InputDocumentFileLocation(
+        id=media.id,
+        access_hash=media.access_hash,
+        file_reference=media.file_reference,
+        thumb_size=""
+    )
+
+    async def file_iterator(start: int, end: int):
+        remaining = end - start + 1
+
+        async for chunk in client.iter_download(
+            media,
+            offset=start,
+            request_size=512 * 1024
+        ):
+            if remaining <= 0:
+                break
+
+            if len(chunk) > remaining:
+                chunk = chunk[:remaining]
+
             yield chunk
+            remaining -= len(chunk)
 
-    headers = {}
-    if getattr(media, "size", None):
-        headers["Content-Length"] = str(media.size)
+    headers = {
+        "Content-Range": f"bytes {start}-{end}/{file_size}",
+        "Accept-Ranges": "bytes",
+        "Content-Length": str(end - start + 1),
+        "Content-Type": "video/mp4"
+    }
 
-    return StreamingResponse(generator(), media_type="video/mp4", headers=headers)
+    return StreamingResponse(
+        file_iterator(start, end),
+        status_code=206 if range_header else 200,
+        headers=headers,
+        media_type="video/mp4"
+    )
