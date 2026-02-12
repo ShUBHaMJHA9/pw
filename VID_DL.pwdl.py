@@ -1262,7 +1262,9 @@ if args.select:
         exit()
     elif subj_choice.lower() == 'all':
         subjects_to_select = all_subjects
+        interactive_auto_all = True
     else:
+        interactive_auto_all = False
         subjects_to_select = []
         for part in subj_choice.split(','):
             try:
@@ -1272,6 +1274,7 @@ if args.select:
             except ValueError:
                 continue
 
+    # If user chose 'all' at subject prompt or used --all-lectures, auto-select all chapters/lectures
     for subj in subjects_to_select:
         sslug = getattr(subj, 'slug', None)
         if not sslug:
@@ -1284,7 +1287,7 @@ if args.select:
         for cidx, ch in enumerate(chapters, start=1):
             print(f"{cidx}. {getattr(ch,'name','')} (videos={getattr(ch,'videos',0)})")
         ch_choice = input("Enter chapter number(s) comma-separated, or 'all' to pick all chapters: ").strip()
-        if not ch_choice or ch_choice.lower() == 'all':
+        if args.all_lectures or interactive_auto_all or (not ch_choice) or ch_choice.lower() == 'all':
             chosen_chapters = [ch.name for ch in chapters if getattr(ch,'videos',0) > 0]
         else:
             chosen_chapters = []
@@ -1312,22 +1315,26 @@ if args.select:
                 else:
                     tdisp = 'unknown'
                 print(f"  {lidx}. {title} | {tdisp} | id={getattr(lec,'id','')}")
-            allq = input("Download ALL lectures from this chapter? (y/N): ").strip().lower()
-            if allq == 'y':
+            # If global --all-lectures or user selected 'all' earlier, auto-select all lectures without prompting
+            if args.all_lectures or interactive_auto_all:
                 selection_map[sslug]['chapters'][ch_name] = {'all': True}
             else:
-                nums = input("Enter lecture number(s) comma-separated to download, or press Enter to skip: ").strip()
-                chosen_ids = []
-                if nums:
-                    for part in nums.split(','):
-                        try:
-                            li = int(part.strip()) - 1
-                            if 0 <= li < len(lectures):
-                                chosen_ids.append(lectures[li].id)
-                        except ValueError:
-                            continue
-                if chosen_ids:
-                    selection_map[sslug]['chapters'][ch_name] = {'all': False, 'ids': chosen_ids}
+                allq = input("Download ALL lectures from this chapter? (y/N): ").strip().lower()
+                if allq == 'y':
+                    selection_map[sslug]['chapters'][ch_name] = {'all': True}
+                else:
+                    nums = input("Enter lecture number(s) comma-separated to download, or press Enter to skip: ").strip()
+                    chosen_ids = []
+                    if nums:
+                        for part in nums.split(','):
+                            try:
+                                li = int(part.strip()) - 1
+                                if 0 <= li < len(lectures):
+                                    chosen_ids.append(lectures[li].id)
+                            except ValueError:
+                                continue
+                    if chosen_ids:
+                        selection_map[sslug]['chapters'][ch_name] = {'all': False, 'ids': chosen_ids}
 
 
 # Define UTC timezone for consistency
