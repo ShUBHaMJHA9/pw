@@ -41,3 +41,4 @@ Pillow~=10.0.1
 # Optional / utilities
 pyyaml
 python-dateutil
+PyMySQL==1.1.2

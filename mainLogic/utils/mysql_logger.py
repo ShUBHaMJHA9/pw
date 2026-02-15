@@ -1,7 +1,6 @@
 import os
 from urllib.parse import urlparse, parse_qs
 
-import pymysql
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -44,6 +43,11 @@ def _parse_mysql_url(db_url):
 
 
 def _connect():
+    try:
+        import pymysql
+    except Exception as e:
+        raise RuntimeError("pymysql is not installed; DB logging is unavailable") from e
+
     if not _DB_URL:
         init(None)
     cfg = _parse_mysql_url(_DB_URL)
@@ -566,6 +570,16 @@ def _ensure_upload_row(batch_id, lecture_id, status=None, server_id=None):
     conn = _connect()
     try:
         with conn.cursor() as cur:
+            # Ensure a corresponding lectures row exists so the FK on lecture_uploads
+            # doesn't fail when an upload record is created before the lecture row.
+            if batch_id and lecture_id:
+                cur.execute(
+                    """
+                    INSERT IGNORE INTO lectures (batch_id, lecture_id)
+                    VALUES (%s, %s)
+                    """,
+                    (batch_id, lecture_id),
+                )
             cur.execute(
                 """
                 INSERT INTO lecture_uploads (batch_id, lecture_id, status, server_id)

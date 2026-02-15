@@ -41,7 +41,7 @@ class Main:
                  ffmpeg="ffmpeg",
                  mp4d="mp4decrypt",
                  tui=True,
-                 token=None, random_id=None, verbose=True, suppress_exit=False, progress_callback=None):
+                 token=None, random_id=None, verbose=True, suppress_exit=False, progress_callback=None, use_gpu=False):
 
         os2 = SysFunc()
 
@@ -65,6 +65,9 @@ class Main:
         self.ffmpeg = BasicUtils.abspath(ffmpeg) if ffmpeg != 'ffmpeg' else 'ffmpeg'
         self.mp4d = BasicUtils.abspath(mp4d) if mp4d != 'mp4decrypt' else 'mp4decrypt'
         self.tui = tui
+
+        # GPU usage flag: when True, ffmpeg merge/encode operations may use hardware encoders
+        self.use_gpu = use_gpu
 
         self.token = token
         self.random_id = random_id
@@ -190,10 +193,14 @@ class Main:
 
 
         merge = Merge()
-        merge.ffmpegMerge(f"{self.directory}/{self.name}-Video.mp4",
-                          f"{self.directory}/{self.name}-Audio.mp4",
-                          f"{self.directory}/{self.name}.mp4",
-                          ffmpeg_path=self.ffmpeg, verbose=self.verbose)
+        merge.ffmpegMerge(
+            f"{self.directory}/{self.name}-Video.mp4",
+            f"{self.directory}/{self.name}-Audio.mp4",
+            f"{self.directory}/{self.name}.mp4",
+            ffmpeg_path=self.ffmpeg,
+            verbose=self.verbose,
+            use_gpu=getattr(self, 'use_gpu', False),
+        )
 
         # Call the progress callback for merge completion
         # if self.progress_callback:

@@ -96,8 +96,8 @@ def start_webui(port, verbose, no_reloader=False, ssl=False, ssl_cert=None, ssl_
 
 
 def download_process(
-        id, name,batch_name,topic_name,lecture_url,
-        state, verbose, simulate=False
+    id, name,batch_name,topic_name,lecture_url,
+    state, verbose, simulate=False, gpu=False
 ):
     """Process a single download or simulate the download."""
     if simulate:
@@ -115,6 +115,7 @@ def download_process(
             lecture_url=lecture_url,
             directory=prefs['dir'],
             ffmpeg=state['ffmpeg'],
+            use_gpu=gpu,
             token=prefs['token'],
             random_id=prefs['random_id'],
             mp4d=state['mp4decrypt'],
@@ -129,7 +130,7 @@ def download_process(
         sys.exit(errorList['downloadFailed']['code'])
 
 
-def handle_csv_file(csv_file, state, batch_name_param, verbose, simulate=False):
+def handle_csv_file(csv_file, state, batch_name_param, verbose, simulate=False, gpu=False):
     """Handle processing of CSV file with or without headers, including new arguments."""
     try:
         if not os.path.exists(csv_file):
@@ -234,14 +235,15 @@ def handle_csv_file(csv_file, state, batch_name_param, verbose, simulate=False):
             if verbose:
                 debugger.info(f"Preparing from CSV line {current_line_num}: ID='{csv_id}', Name='{csv_name}' (Folder: '{final_safe_name}'), Batch='{csv_batch_name}', Topic='{csv_topic_name}', URL='{csv_lecture_url}'")
 
-            download_process(
+                download_process(
                 id=csv_id,
                 name=final_safe_name, # Already safe
                 batch_name=csv_batch_name,
                 topic_name=csv_topic_name,
                 lecture_url=csv_lecture_url,
                 state=state,
-                verbose=verbose
+                verbose=verbose,
+                gpu=gpu
             )
 
 
@@ -249,7 +251,7 @@ def main(csv_file=None,
          id=None, name=None,batch_name=None,topic_name=None,lecture_url=None,
          directory=None, verbose=False, shell=False, webui_port=None, no_reloader=False, tmp_dir=None,
          new_downloader=False,
-         simulate=False, ssl=False, ssl_cert=None, ssl_key=None, ssl_password=None):
+         simulate=False, ssl=False, ssl_cert=None, ssl_key=None, ssl_password=None, gpu=False):
     global prefs  # Use global keyword to modify global prefs
 
     if shell:
@@ -269,10 +271,10 @@ def main(csv_file=None,
     if simulate:
         if csv_file:
             # Pass batch_name from main args to handle_csv_file for simulation context
-            handle_csv_file(csv_file, state, batch_name, glv.vout, simulate=True)
+            handle_csv_file(csv_file, state, batch_name, glv.vout, simulate=True, gpu=gpu)
         elif id and name:
             # For single simulated download, batch_name, topic_name, lecture_url from args are used
-            download_process(id, name, batch_name, topic_name, lecture_url, state, glv.vout, simulate=True)
+            download_process(id, name, batch_name, topic_name, lecture_url, state, glv.vout, simulate=True, gpu=gpu)
         return
 
     if csv_file and (id or name):
@@ -282,7 +284,7 @@ def main(csv_file=None,
     if csv_file:
         # Pass batch_name from main args to handle_csv_file
         # This batch_name acts as a default if not specified in the CSV
-        handle_csv_file(csv_file, state, batch_name, glv.vout, simulate=False) # simulate is False here
+        handle_csv_file(csv_file, state, batch_name, glv.vout, simulate=False, gpu=gpu) # simulate is False here
     elif id and name:
         download_process(
             id=id,
@@ -291,7 +293,8 @@ def main(csv_file=None,
             topic_name=topic_name,
             lecture_url=lecture_url,
             state=state,
-            verbose=glv.vout
+            verbose=glv.vout,
+            gpu=gpu
         )
     else:
         # If not shell, not webui, not csv, and not id/name, it's an invalid invocation or just setup.

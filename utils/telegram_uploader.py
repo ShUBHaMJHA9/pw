@@ -71,8 +71,9 @@ async def _upload_async(
     except Exception as e:
         raise RuntimeError(f"pyrogram is required: {e}")
 
+    session_name = os.environ.get("TELEGRAM_SESSION_NAME") or f"bot_pyrogram_{os.getpid()}_{int(time.time())}"
     client = Client(
-        "bot_pyrogram",
+        session_name,
         api_id=int(TELEGRAM_API_ID),
         api_hash=TELEGRAM_API_HASH,
         bot_token=TELEGRAM_BOT_TOKEN,

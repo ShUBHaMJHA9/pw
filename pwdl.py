@@ -30,6 +30,7 @@ def parse_arguments():
     parser.add_argument('--simulate', action='store_true',
                         help='Simulate the download process. No files will be downloaded. Incompatible wit h '
                              '--csv-file. Must be used with --id and --name')
+    parser.add_argument('--gpu', action='store_true', help='Enable GPU acceleration for ffmpeg operations')
     parser.add_argument('--version', action='version', version='%(prog)s 1.0')
     parser.add_argument('--login', action='store_true', help='Login to PhysicsWallah')
     parser.add_argument('--phone', type=str, help='Phone number for login (optional)')
@@ -102,6 +103,7 @@ if __name__ == "__main__":
         webui_port=args.webui,
         no_reloader=args.no_reloader,
         simulate=args.simulate,
+        gpu=args.gpu,
         ssl=args.ssl,
         ssl_cert=args.ssl_cert,
         ssl_key=args.ssl_key,
