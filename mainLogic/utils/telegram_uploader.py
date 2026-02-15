@@ -111,8 +111,8 @@ async def _upload_async(file_path, caption=None, as_video=False, progress_callba
             # Telethon expects chat target as int id or username; _normalize_chat_id already handles numeric and strings
             chat_target = _normalize_chat_id(TELEGRAM_CHAT_ID)
 
-            upload_workers = _get_int_env("TELEGRAM_UPLOAD_WORKERS", 8)
-            part_size_kb = _get_int_env("TELEGRAM_UPLOAD_PART_SIZE_KB", 1024)
+            upload_workers = _get_int_env("TELEGRAM_UPLOAD_WORKERS", 16)
+            part_size_kb = _get_int_env("TELEGRAM_UPLOAD_PART_SIZE_KB", 4096)
 
             status_msg = None
             upload_title = os.path.basename(file_path)
@@ -218,8 +218,8 @@ async def _upload_async(file_path, caption=None, as_video=False, progress_callba
     )
     await client.start()
     try:
-        upload_workers = _get_int_env("TELEGRAM_UPLOAD_WORKERS", 8)
-        part_size_kb = _get_int_env("TELEGRAM_UPLOAD_PART_SIZE_KB", 1024)
+        upload_workers = _get_int_env("TELEGRAM_UPLOAD_WORKERS", 16)
+        part_size_kb = _get_int_env("TELEGRAM_UPLOAD_PART_SIZE_KB", 4096)
         chat_target = _normalize_chat_id(TELEGRAM_CHAT_ID)
         status_msg = None
         upload_title = os.path.basename(file_path)

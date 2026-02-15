@@ -83,8 +83,8 @@ async def _upload_async(
 
     try:
         # 🔥 SPEED TUNING (important part)
-        upload_workers = _get_int_env("TELEGRAM_UPLOAD_WORKERS", 8)      # more parallel workers
-        part_size_kb = _get_int_env("TELEGRAM_UPLOAD_PART_SIZE_KB", 1024)  # bigger chunks
+        upload_workers = _get_int_env("TELEGRAM_UPLOAD_WORKERS", 16)      # more parallel workers
+        part_size_kb = _get_int_env("TELEGRAM_UPLOAD_PART_SIZE_KB", 4096)  # bigger chunks
 
         chat_target = _normalize_chat_id(TELEGRAM_CHAT_ID)
 
