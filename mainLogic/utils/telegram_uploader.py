@@ -100,7 +100,7 @@ def _extract_floodwait_seconds(exc, default=10):
     return int(default)
 
 
-async def mtproto_batch_upload(file_paths, chat_id=None, session_name=None, concurrency=2, caption=None, thumb_path=None, as_video=False):
+async def mtproto_batch_upload(file_paths, chat_id=None, session_name=None, concurrency=2, caption=None, thumb_path=None, as_video=False, progress_callback=None):
     """Batch upload files via Telethon (MTProto) using a single user session.
 
     - Uses streaming uploads (no full file in memory)
@@ -120,6 +120,8 @@ async def mtproto_batch_upload(file_paths, chat_id=None, session_name=None, conc
 
     part_size_kb = _get_int_env("TELEGRAM_UPLOAD_PART_SIZE_KB", 16384)
     max_retries = _get_int_env("TELEGRAM_UPLOAD_MAX_RETRIES", 3)
+    # Use a higher default for workers to speed up large file uploads on capable networks
+    upload_workers = _get_int_env("TELEGRAM_UPLOAD_WORKERS", 32)
 
     session = session_name or TELETHON_SESSION
     client = TelegramClient(session, int(TELEGRAM_API_ID), TELEGRAM_API_HASH)
@@ -159,6 +161,7 @@ async def mtproto_batch_upload(file_paths, chat_id=None, session_name=None, conc
                 # Pass caption/thumb/video flags through to Telethon send_file
                 send_kwargs = {
                     'part_size_kb': part_size_kb,
+                    'workers': max(1, int(upload_workers or 1)),
                 }
                 if caption:
                     send_kwargs['caption'] = caption
@@ -166,6 +169,9 @@ async def mtproto_batch_upload(file_paths, chat_id=None, session_name=None, conc
                     send_kwargs['thumb'] = thumb_path
                 if as_video:
                     send_kwargs['video'] = True
+                # Forward progress callback if provided so callers receive progress updates
+                if progress_callback:
+                    send_kwargs['progress_callback'] = progress_callback
                 msg = await asyncio.wait_for(
                     client.send_file(chat_target, path, **send_kwargs), timeout=send_timeout
                 )
@@ -256,8 +262,9 @@ async def _upload_async(file_path, caption=None, as_video=False, progress_callba
             # Telethon expects chat target as int id or username; _normalize_chat_id already handles numeric and strings
             chat_target = _normalize_chat_id(TELEGRAM_CHAT_ID)
 
-            upload_workers = _get_int_env("TELEGRAM_UPLOAD_WORKERS", 16)
-            part_size_kb = _get_int_env("TELEGRAM_UPLOAD_PART_SIZE_KB", 4096)
+            # Pick tunable defaults; allow env override
+            upload_workers = _get_int_env("TELEGRAM_UPLOAD_WORKERS", 32)
+            part_size_kb = _get_int_env("TELEGRAM_UPLOAD_PART_SIZE_KB", 8192)
 
             status_msg = None
             upload_title = os.path.basename(file_path)
@@ -320,6 +327,7 @@ async def _upload_async(file_path, caption=None, as_video=False, progress_callba
 
             # Send file via Telethon (user session). Telethon will handle chunking.
             try:
+                # Use workers for parallel chunk uploads to improve speed
                 msg = await client.send_file(
                     chat_target,
                     file_path,
@@ -327,12 +335,13 @@ async def _upload_async(file_path, caption=None, as_video=False, progress_callba
                     thumb=thumb_path,
                     progress_callback=_telethon_progress,
                     part_size_kb=part_size_kb,
+                    workers=max(1, int(upload_workers or 1)),
                 )
             except Exception as e:
                 if isinstance(e, getattr(telethon_errors, 'FloodWaitError', ())) or 'FLOOD_WAIT' in str(e):
                     wait_for = _extract_floodwait_seconds(e, default=10)
                     await asyncio.sleep(wait_for)
-                    msg = await client.send_file(chat_target, file_path, caption=caption)
+                    msg = await client.send_file(chat_target, file_path, caption=caption, workers=max(1, int(upload_workers or 1)))
                 else:
                     raise
 
@@ -466,8 +475,9 @@ async def _upload_async(file_path, caption=None, as_video=False, progress_callba
                 continue
             raise
     try:
-        upload_workers = _get_int_env("TELEGRAM_UPLOAD_WORKERS", 16)
-        part_size_kb = _get_int_env("TELEGRAM_UPLOAD_PART_SIZE_KB", 4096)
+        # Pyrogram: tune defaults for faster transfers; can be overridden via env
+        upload_workers = _get_int_env("TELEGRAM_UPLOAD_WORKERS", 32)
+        part_size_kb = _get_int_env("TELEGRAM_UPLOAD_PART_SIZE_KB", 8192)
         chat_target = _normalize_chat_id(TELEGRAM_CHAT_ID)
         status_msg = None
         upload_title = os.path.basename(file_path)

@@ -910,7 +910,7 @@ def upload_to_telegram(file_path, caption=None, thumb_path=None, as_video=False,
                 _mt_conc = int(os.environ.get("TELEGRAM_UPLOAD_WORKERS", "4"))
             except Exception:
                 _mt_conc = 4
-            results = asyncio.run(mtproto_batch_upload([file_path], chat_id=chat_id, session_name=session, concurrency=_mt_conc, caption=caption, thumb_path=thumb_path, as_video=upload_as_video))
+            results = asyncio.run(mtproto_batch_upload([file_path], chat_id=chat_id, session_name=session, concurrency=_mt_conc, caption=caption, thumb_path=thumb_path, as_video=upload_as_video, progress_callback=progress_callback))
             if results and isinstance(results, list) and results[0].get('ok'):
                 r = results[0]
                 return {
