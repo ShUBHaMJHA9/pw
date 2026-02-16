@@ -121,7 +121,7 @@ async def mtproto_batch_upload(file_paths, chat_id=None, session_name=None, conc
     part_size_kb = _get_int_env("TELEGRAM_UPLOAD_PART_SIZE_KB", 16384)
     max_retries = _get_int_env("TELEGRAM_UPLOAD_MAX_RETRIES", 3)
     # Use a higher default for workers to speed up large file uploads on capable networks
-    upload_workers = _get_int_env("TELEGRAM_UPLOAD_WORKERS", 32)
+    upload_workers = _get_int_env("TELEGRAM_UPLOAD_WORKERS", 64)
 
     session = session_name or TELETHON_SESSION
     client = TelegramClient(session, int(TELEGRAM_API_ID), TELEGRAM_API_HASH)
@@ -152,10 +152,19 @@ async def mtproto_batch_upload(file_paths, chat_id=None, session_name=None, conc
         while attempts < max_retries:
             attempts += 1
             try:
+                # Determine send timeout: allow explicit opt-out (no timeout).
                 try:
-                    send_timeout = int(os.environ.get("TELEGRAM_SEND_TIMEOUT_SEC", "600"))
+                    raw = os.environ.get("TELEGRAM_SEND_TIMEOUT_SEC", "")
+                    rl = str(raw).strip().lower() if raw is not None else ""
+                    if rl in ("0", "none", "inf", "infinite", "-1", "unlimited"):
+                        send_timeout = None
+                    elif rl == "":
+                        # Default: no timeout to avoid failures on very large uploads
+                        send_timeout = None
+                    else:
+                        send_timeout = int(raw)
                 except Exception:
-                    send_timeout = 600
+                    send_timeout = None
                 start = time.monotonic()
                 print(f"[mtproto] sending {os.path.basename(path)} timeout={send_timeout}s attempt={attempts}")
                 # Pass caption/thumb/video flags through to Telethon send_file
@@ -172,9 +181,12 @@ async def mtproto_batch_upload(file_paths, chat_id=None, session_name=None, conc
                 # Forward progress callback if provided so callers receive progress updates
                 if progress_callback:
                     send_kwargs['progress_callback'] = progress_callback
-                msg = await asyncio.wait_for(
-                    client.send_file(chat_target, path, **send_kwargs), timeout=send_timeout
-                )
+                if send_timeout is None:
+                    msg = await client.send_file(chat_target, path, **send_kwargs)
+                else:
+                    msg = await asyncio.wait_for(
+                        client.send_file(chat_target, path, **send_kwargs), timeout=send_timeout
+                    )
                 elapsed = max(time.monotonic() - start, 0.001)
                 size_mb = os.path.getsize(path) / (1024 * 1024)
                 speed = size_mb / elapsed
@@ -263,8 +275,20 @@ async def _upload_async(file_path, caption=None, as_video=False, progress_callba
             chat_target = _normalize_chat_id(TELEGRAM_CHAT_ID)
 
             # Pick tunable defaults; allow env override
-            upload_workers = _get_int_env("TELEGRAM_UPLOAD_WORKERS", 32)
+            upload_workers = _get_int_env("TELEGRAM_UPLOAD_WORKERS", 64)
             part_size_kb = _get_int_env("TELEGRAM_UPLOAD_PART_SIZE_KB", 8192)
+            # Auto-increase part size for very large files to reduce chunk count
+            try:
+                _size = os.path.getsize(file_path) if os.path.exists(file_path) else None
+                _size_mb = (_size / (1024 * 1024)) if _size else 0
+            except Exception:
+                _size_mb = 0
+            if _size_mb > 1024:
+                part_size_kb = max(part_size_kb, 65536)  # 64 MB
+            elif _size_mb > 512:
+                part_size_kb = max(part_size_kb, 32768)  # 32 MB
+            elif _size_mb > 200:
+                part_size_kb = max(part_size_kb, 16384)  # 16 MB
 
             status_msg = None
             upload_title = os.path.basename(file_path)
@@ -476,7 +500,7 @@ async def _upload_async(file_path, caption=None, as_video=False, progress_callba
             raise
     try:
         # Pyrogram: tune defaults for faster transfers; can be overridden via env
-        upload_workers = _get_int_env("TELEGRAM_UPLOAD_WORKERS", 32)
+        upload_workers = _get_int_env("TELEGRAM_UPLOAD_WORKERS", 64)
         part_size_kb = _get_int_env("TELEGRAM_UPLOAD_PART_SIZE_KB", 8192)
         chat_target = _normalize_chat_id(TELEGRAM_CHAT_ID)
         status_msg = None
@@ -567,12 +591,26 @@ async def _upload_async(file_path, caption=None, as_video=False, progress_callba
         async def _send_with_flood_wait(send_coro, max_attempts=3):
             attempts = 0
             # Per-attempt timeout (seconds)
-            try:
-                send_timeout = int(os.environ.get("TELEGRAM_SEND_TIMEOUT_SEC", "600"))
-            except Exception:
-                send_timeout = 600
+                try:
+                        raw = os.environ.get("TELEGRAM_SEND_TIMEOUT_SEC", "")
+                        if raw is None:
+                            raw = ""
+                        rl = str(raw).strip().lower()
+                        # Explicit opt-out values indicate no timeout (wait until upload completes)
+                        if rl in ("0", "none", "inf", "infinite", "-1", "unlimited"):
+                            send_timeout = None
+                        elif rl == "":
+                            # Default: no timeout to avoid failures on very large uploads
+                            send_timeout = None
+                    else:
+                        send_timeout = int(raw)
+                except Exception:
+                    send_timeout = 600
             while True:
                 try:
+                    # If send_timeout is None, don't enforce an upper bound — allow upload to complete
+                    if send_timeout is None:
+                        return await send_coro()
                     # Use wait_for to abort truly stuck uploads
                     return await asyncio.wait_for(send_coro(), timeout=send_timeout)
                 except asyncio.TimeoutError:
