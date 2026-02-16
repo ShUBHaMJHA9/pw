@@ -61,7 +61,42 @@ class LoginInterface:
                 if isinstance(token, dict):
                     user_id = token.get("user", {}).get("id") or token.get("user", {}).get("_id")
                     if user_id:
+                        # Maintain backward compatibility: update top-level user_id
                         u.update("user_id", user_id, debug=debug)
+
+                # Also support multi-user storage under 'users' list in prefs
+                try:
+                    # Load existing prefs dict
+                    prefs = u.data if isinstance(u.data, dict) else {}
+                    users = prefs.get('users') if isinstance(prefs.get('users'), list) else []
+                    # Build user entry
+                    entry = {
+                        'phone': ph_num,
+                        'name': token.get('user', {}).get('firstName') if isinstance(token, dict) else None,
+                        'access_token': token.get('access_token') if isinstance(token, dict) else None,
+                        'token': token,
+                    }
+                    # Prefer id keys if available
+                    uid = None
+                    if isinstance(token, dict):
+                        uid = token.get('user', {}).get('id') or token.get('user', {}).get('_id')
+                    if uid:
+                        entry['id'] = uid
+
+                    # Replace existing entry with same id or phone, else append
+                    replaced = False
+                    for i, ex in enumerate(users):
+                        if (uid and ex.get('id') == uid) or (ex.get('phone') == ph_num):
+                            users[i] = {**ex, **entry}
+                            replaced = True
+                            break
+                    if not replaced:
+                        users.append(entry)
+                    prefs['users'] = users
+                    u.data = prefs
+                    u.save()
+                except Exception as _e:
+                    debugger.error(f"Failed to persist multi-user prefs: {_e}")
 
                 # Use a high update index so local token wins Syncer merge.
                 u.update("user_update_index", int(time.time() * 1000), debug=debug)

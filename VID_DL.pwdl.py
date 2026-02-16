@@ -38,6 +38,11 @@ from mainLogic.utils.gen_utils import generate_safe_folder_name
 
 # --- 1. Set up argparse (minimal; keep interactive flow only) ---
 parser = argparse.ArgumentParser(description="Scrape and upload lectures with interactive selection.")
+# CLI options: support login, provide phone, select user non-interactively, and list batches for all users
+parser.add_argument('--login', action='store_true', help='Run login flow and add profile to preferences')
+parser.add_argument('--phone', type=str, help='Phone number to pass to login (optional)')
+parser.add_argument('--user', type=str, help='Select user profile by index (1-based), id, or name (non-interactive)')
+parser.add_argument('--all-batches', action='store_true', help='List purchased batches for all stored user profiles and exit')
 args = parser.parse_args()
 
 try:
@@ -57,6 +62,27 @@ def _select_user_and_init_api(prefs):
     if not users:
         # fallback to existing module-level batch_api
         return ScraperModule.batch_api
+
+    # Non-interactive user selection via CLI arg
+    if getattr(args, 'user', None):
+        key = str(args.user).strip()
+        # numeric index
+        try:
+            idx = int(key) - 1
+            if 0 <= idx < len(users):
+                chosen = users[idx]
+            else:
+                debugger.error("--user index out of range, defaulting to first user")
+                chosen = users[0]
+        except Exception:
+            # match by id or name
+            found = None
+            for u in users:
+                if str(u.get('id')) == key or str(u.get('name')) == key or str(u.get('username')) == key:
+                    found = u
+                    break
+            chosen = found or users[0]
+        # proceed to init below
 
     print("Multiple user profiles found. Select user to use for API requests:")
     for idx, u in enumerate(users, start=1):
@@ -121,6 +147,46 @@ def _select_user_and_init_api(prefs):
 
 
 # Initialize batch_api using selected user if available
+# If login requested via CLI, run login flow and reload prefs
+if getattr(args, 'login', False):
+    try:
+        from mainLogic.startup.Login.call_login import LoginInterface
+        LoginInterface.cli(getattr(args, 'phone', None))
+        # reload prefs from file
+        try:
+            with open(PREFS_FILE, 'r', encoding='utf-8') as f:
+                prefs = json.load(f)
+        except Exception:
+            prefs = ScraperModule.prefs
+    except Exception as e:
+        debugger.error(f"Login failed: {e}")
+
+# If --all-batches requested, list batches for every stored profile and exit
+if getattr(args, 'all_batches', False):
+    users = prefs.get('users', []) if isinstance(prefs, dict) else []
+    if not users:
+        debugger.error("No user profiles found in preferences.")
+        exit()
+    for u in users:
+        name = u.get('name') or u.get('username') or str(u.get('id'))
+        token = u.get('access_token') or u.get('token') or (u.get('token', {}) if isinstance(u.get('token'), dict) else None)
+        print(f"\nBatches for profile: {name}")
+        try:
+            if isinstance(token, dict):
+                access = token.get('access_token')
+            else:
+                access = u.get('access_token') or u.get('token')
+            if not access:
+                print("  No access token for this profile, skipping.")
+                continue
+            api = Endpoints(verbose=False).set_token(access)
+            batches = api.get_purchased_batches(all_pages=True)
+            for b in batches:
+                print(f"  - {b.get('name')} (slug={b.get('slug')}, id={b.get('_id')})")
+        except Exception as e:
+            print(f"  Failed to fetch batches: {e}")
+    exit()
+
 batch_api = _select_user_and_init_api(prefs)
 
 # --- Interactive defaults (no CLI flags) ---
