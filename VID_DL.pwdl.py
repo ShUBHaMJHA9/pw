@@ -10,10 +10,13 @@ import tempfile
 import time
 from datetime import datetime, timezone, timedelta
 from operator import attrgetter # For easier sorting
+import asyncio
 
 import pytz # Make sure to pip install pytz if you haven't already
 import requests
 from beta.batch_scraper_2.module import ScraperModule
+from beta.batch_scraper_2.Endpoints import Endpoints
+from mainLogic.utils.glv_var import PREFS_FILE
 
 try:
     from rich.console import Console
@@ -33,129 +36,8 @@ except Exception:
 from mainLogic.downloader import main as downloader # Renamed to avoid confusion with internal 'main'
 from mainLogic.utils.gen_utils import generate_safe_folder_name
 
-batch_name_default = "yakeen-neet-2-0-2026-854543"
-
-# --- 1. Set up argparse ---
-parser = argparse.ArgumentParser(description="Scrape and download lectures from PenPencil batches.")
-parser.add_argument(
-    "--batch", "-b",
-    type=str,
-    default=batch_name_default,
-    help=f"Name/slug of the batch to scrape (default: {batch_name_default})."
-)
-parser.add_argument(
-    "--subjects", "-s",
-    type=str,
-    help="Comma-separated list of subject slugs to filter. If not provided, all subjects are processed.",
-)
-parser.add_argument(
-    "--subject",
-    type=str,
-    help="Single subject slug to filter. Overrides --subjects.",
-)
-parser.add_argument(
-    "--chapter",
-    type=str,
-    help="Chapter name to filter within the selected subject.",
-)
-parser.add_argument(
-    "--lecture-id",
-    type=str,
-    help="Download a specific lecture ID (requires --subject and --chapter).",
-)
-parser.add_argument(
-    "--latest-nth", "-n",
-    type=int,
-    default=None, # No default, means get all latest for each subject by default
-    help="Fetch the Nth latest lecture for each subject (0 for the absolute latest, 1 for the second latest, etc.). "
-         "If not provided, all lectures (matching --date if set) are considered.",
-)
-parser.add_argument(
-    "--date", "-dt",
-    type=str,
-    default=None,
-    help="Filter lectures to a specific date in 'dd.mm.yyyy' format. "
-         "If used with -n, it finds the Nth latest lecture *on that specific date*.",
-)
-parser.add_argument(
-    "--download", "-d",
-    action="store_true",
-    help="Enable downloading of the selected lecture(s)."
-)
-parser.add_argument(
-    "--all-lectures",
-    action="store_true",
-    help="Download all lectures for selected subjects/chapters."
-)
-parser.add_argument(
-    "--download-dir", "-dd",
-    type=str,
-    default="./" if not ScraperModule.prefs.get("extension_download_dir") else ScraperModule.prefs.get("extension_download_dir"),
-    help="Base directory for downloads (default: ./)."
-)
-parser.add_argument(
-    "--list-batches",
-    action="store_true",
-    help="List purchased batches and exit."
-)
-parser.add_argument(
-    "--select",
-    action="store_true",
-    help="Interactive selection of batch/subject/lecture."
-)
-parser.add_argument(
-    "--db-log",
-    action="store_true",
-    help="Enable DB logging (attempts to import mysql logger)."
-)
-
-parser.add_argument(
-    "--upload-telegram",
-    action="store_true",
-    help="Upload downloaded lecture to Telegram using bot credentials from .env."
-)
-parser.add_argument(
-    "--upload-as-video",
-    action="store_true",
-    help="Upload as Telegram video instead of document (falls back to document on failure)."
-)
-
-parser.add_argument(
-    "--db-url",
-    type=str,
-    default=None,
-    help="Override DB URL (defaults to PWDL_DB_URL from .env)."
-)
-parser.add_argument(
-    "--server-id",
-    type=str,
-    default=None,
-    help="Unique server identifier for DB locks (defaults to hostname)."
-)
-parser.add_argument(
-    "--min-free-gb",
-    type=float,
-    default=2.0,
-    help="Minimum free disk space (GB) required to start a download."
-)
-parser.add_argument(
-    "--lock-ttl-min",
-    type=int,
-    default=120,
-    help="Minutes before an in-progress DB lock can be reclaimed."
-)
-parser.add_argument(
-    "--delete-after-upload",
-    action="store_true",
-    default=True,
-    help="Delete local file after successful upload (default: True)."
-)
-parser.add_argument(
-    "--force-reupload",
-    action="store_true",
-    help="Ignore DB 'done' state and force re-download/re-upload."
-)
-
+# --- 1. Set up argparse (minimal; keep interactive flow only) ---
+parser = argparse.ArgumentParser(description="Scrape and upload lectures with interactive selection.")
 args = parser.parse_args()
 
 try:
@@ -166,58 +48,101 @@ except Exception:
     pass
 
 prefs = ScraperModule.prefs # Still keep prefs for other potential settings
-batch_api = ScraperModule.batch_api
 debugger = ScraperModule.debugger
 
-# --- Apply arguments ---
-batch_input = args.batch
-# Process subjects_of_interest from command line
-if args.subject:
-    subjects_of_interest = {args.subject.strip()}
-elif args.subjects:
-    subjects_of_interest = set([s.strip() for s in args.subjects.split(',') if s.strip()])
-else:
-    # If not provided via CLI, fall back to prefs or keep empty for no filtering
-    subjects_of_interest = set(ScraperModule.prefs.get("subjects_of_interest", []))
+# --- Multi-user preference support ---
+# Expect prefs to have a 'users' key with a list of {name, token or access_token, random_id?}
+def _select_user_and_init_api(prefs):
+    users = prefs.get('users', []) if isinstance(prefs, dict) else []
+    if not users:
+        # fallback to existing module-level batch_api
+        return ScraperModule.batch_api
 
-download_enabled = args.download
-upload_telegram = args.upload_telegram
-upload_as_video = args.upload_as_video
-base_download_directory = args.download_dir
-server_id = args.server_id or socket.gethostname()
-min_free_gb = args.min_free_gb
-lock_ttl_min = args.lock_ttl_min
-delete_after_upload = args.delete_after_upload
+    print("Multiple user profiles found. Select user to use for API requests:")
+    for idx, u in enumerate(users, start=1):
+        uname = u.get('name') or u.get('username') or f"user-{idx}"
+        token_preview = (u.get('access_token') or u.get('token') or '')[:8]
+        print(f"  {idx}. {uname} (token startswith: {token_preview}...)")
+    print("  a. Add new user")
+    print("  q. Quit")
+    sel = input("Choose user (number) or action [1]: ").strip()
+    if not sel:
+        sel = '1'
+    if sel.lower() == 'q':
+        print("Exiting.")
+        exit()
+    if sel.lower() == 'a':
+        name = input("Enter profile name: ").strip() or f"user-{len(users)+1}"
+        token = input("Enter access token (Bearer token string): ").strip()
+        random_id = input("Enter random_id (optional): ").strip() or None
+        new_user = {'name': name, 'access_token': token}
+        if random_id:
+            new_user['random_id'] = random_id
+        users.append(new_user)
+        # persist back to prefs file
+        try:
+            with open(PREFS_FILE, 'r', encoding='utf-8') as f:
+                pf = json.load(f)
+        except Exception:
+            pf = prefs if isinstance(prefs, dict) else {}
+        pf['users'] = users
+        try:
+            with open(PREFS_FILE, 'w', encoding='utf-8') as f:
+                json.dump(pf, f, indent=2)
+            print(f"Saved new profile to preferences: {PREFS_FILE}")
+        except Exception as e:
+            debugger.error(f"Failed to save preferences file: {e}")
+        chosen = users[-1]
+    else:
+        try:
+            idx = int(sel) - 1
+            if idx < 0 or idx >= len(users):
+                print("Invalid selection, defaulting to first user.")
+                idx = 0
+            chosen = users[idx]
+        except ValueError:
+            print("Invalid input, defaulting to first user.")
+            chosen = users[0]
 
-# Parse the specific date filter if provided
-specific_date_filter_utc = None
-if args.date:
+    token = chosen.get('access_token') or chosen.get('token') or chosen.get('token_config', {}).get('access_token')
+    random_id = chosen.get('random_id') or chosen.get('randomId') or chosen.get('token_config', {}).get('random_id')
+    if not token:
+        debugger.error("Selected profile does not have a token. Please update preferences.")
+        return ScraperModule.batch_api
+
     try:
-        # Assuming input is dd.mm.yyyy, convert to datetime object at midnight in IST, then to UTC
-        day, month, year = map(int, args.date.split('.'))
-        target_date_ist = datetime(year, month, day, 0, 0, 0, tzinfo=pytz.timezone('Asia/Kolkata'))
-        specific_date_filter_utc = target_date_ist.astimezone(timezone.utc)
-        debugger.info(f"Filtering for lectures on specific date: {args.date} (UTC: {specific_date_filter_utc.date()})")
-    except ValueError as e:
-        debugger.error(f"Invalid date format for --date: {args.date}. Please use 'dd.mm.yyyy'. Error: {e}")
-        exit() # Exit if the date format is incorrect
+        if random_id:
+            return Endpoints(verbose=False).set_token(token, random_id=random_id)
+        else:
+            return Endpoints(verbose=False).set_token(token)
+    except Exception as e:
+        debugger.error(f"Failed to initialize API with selected profile: {e}")
+        return ScraperModule.batch_api
+
+
+# Initialize batch_api using selected user if available
+batch_api = _select_user_and_init_api(prefs)
+
+# --- Interactive defaults (no CLI flags) ---
+batch_input = None
+subjects_of_interest = set()
+
+download_enabled = True
+upload_telegram = True
+upload_as_video = bool(prefs.get("upload_as_video", False))
+base_download_directory = prefs.get("extension_download_dir") or "./"
+server_id = socket.gethostname()
+min_free_gb = float(prefs.get("min_free_gb", 2.0))
+lock_ttl_min = int(prefs.get("lock_ttl_min", 120))
+delete_after_upload = bool(prefs.get("delete_after_upload", True))
+force_reupload = bool(prefs.get("force_reupload", False))
+
+specific_date_filter_utc = None
 
 
 # Ensure batch_api is initialized before use
 if batch_api is None:
     debugger.error("ScraperModule.batch_api is not initialized. Please check token setup.")
-    exit()
-
-if args.list_batches:
-    batches = batch_api.get_purchased_batches(all_pages=True)
-    if not batches:
-        debugger.warning("No purchased batches found.")
-        exit()
-    for idx, batch in enumerate(batches, start=1):
-        name = batch.get("name", "")
-        slug = batch.get("slug", "")
-        batch_id = batch.get("_id", "")
-        debugger.info(f"{idx}. {name} | slug={slug} | id={batch_id}")
     exit()
 
 batch_slug = batch_input
@@ -230,44 +155,37 @@ except Exception as e:
     purchased_batches = []
     debugger.error(f"Failed to load purchased batches: {e}")
 
-# If interactive select is requested, prompt the user to pick a batch
-if args.select:
-    if not purchased_batches:
-        debugger.error("No purchased batches available for selection.")
+# Interactive batch selection (always on)
+if not purchased_batches:
+    debugger.error("No purchased batches available for selection.")
+    exit()
+print("Purchased batches:")
+for idx, b in enumerate(purchased_batches, start=1):
+    print(f"{idx}. {b.get('name','')}  (slug={b.get('slug')}, id={b.get('_id')})")
+choice = input("Enter batch number: ").strip()
+if not choice:
+    debugger.error("No batch selected.")
+    exit()
+try:
+    i = int(choice) - 1
+    if 0 <= i < len(purchased_batches):
+        sel = purchased_batches[i]
+        batch_input = sel.get('slug') or sel.get('_id')
+    else:
+        debugger.error("Invalid batch number selected.")
         exit()
-    print("Purchased batches:")
-    for idx, b in enumerate(purchased_batches, start=1):
-        print(f"{idx}. {b.get('name','')}  (slug={b.get('slug')}, id={b.get('_id')})")
-    choice = input("Enter batch number or slug (or press Enter to keep default): ").strip()
-    if choice:
-        # try number first
-        try:
-            i = int(choice) - 1
-            if 0 <= i < len(purchased_batches):
-                sel = purchased_batches[i]
-                batch_input = sel.get('slug') or sel.get('_id')
-            else:
-                debugger.error("Invalid batch number selected.")
-                exit()
-        except ValueError:
-            # treat as slug/id
-            batch_input = choice
+except ValueError:
+    debugger.error("Invalid input. Enter a batch number.")
+    exit()
 
-# If DB logging requested, try to import logger
+# DB logging (auto-enable when DB URL is present)
 db_logger = None
-if args.db_log:
+if os.getenv("PWDL_DB_URL"):
     try:
         from mainLogic.utils import mysql_logger as db_logger
-        debugger.info("DB logger loaded.")
+        debugger.info("DB logger enabled.")
     except Exception as e:
         debugger.error(f"Failed to import DB logger: {e}")
-        db_logger = None
-elif upload_telegram and os.getenv("PWDL_DB_URL"):
-    try:
-        from mainLogic.utils import mysql_logger as db_logger
-        debugger.info("DB logger auto-enabled to prevent duplicate uploads.")
-    except Exception as e:
-        debugger.error(f"Failed to auto-enable DB logger: {e}")
         db_logger = None
 
 def ensure_free_space(path, min_gb):
@@ -284,7 +202,7 @@ def ensure_free_space(path, min_gb):
 
 if db_logger:
     try:
-        db_logger.init(args.db_url)
+        db_logger.init(None)
         db_logger.ensure_schema()
     except Exception as e:
         debugger.error(f"DB init failed: {e}")
@@ -349,6 +267,80 @@ def _local_mark_upload_done(batch_id, lecture_id, lecture_name=None, chapter_nam
     }
     _local_upload_cache_dirty = True
     _save_upload_cache()
+
+def _get_subject_api_id(subject_obj):
+    return (
+        getattr(subject_obj, "subjectId", None)
+        or getattr(subject_obj, "id", None)
+        or getattr(subject_obj, "_id", None)
+    )
+
+def _get_chapter_tag_id(chapter_obj):
+    return (
+        getattr(chapter_obj, "typeId", None)
+        or getattr(chapter_obj, "type_id", None)
+        or getattr(chapter_obj, "id", None)
+        or getattr(chapter_obj, "_id", None)
+    )
+
+def _normalize_tag_name(value):
+    if not value:
+        return ""
+    return re.sub(r"\s+", " ", str(value)).strip().lower()
+
+def _filter_lectures_by_tag_name(lectures, chapter_name):
+    if not lectures:
+        return []
+    target = _normalize_tag_name(chapter_name)
+    if not target:
+        return []
+    filtered = []
+    for lecture in lectures:
+        tags = getattr(lecture, "tags", None) or []
+        for tag in tags:
+            tag_name = _normalize_tag_name(getattr(tag, "name", None))
+            if tag_name == target:
+                filtered.append(lecture)
+                break
+    return filtered
+
+def _fetch_chapter_lectures(batch_api, batch_id, batch_slug, subject_obj, subject_slug, chapter_obj):
+    subject_api_id = _get_subject_api_id(subject_obj)
+    tag_ids = []
+    primary_tag = _get_chapter_tag_id(chapter_obj)
+    if primary_tag:
+        tag_ids.append(primary_tag)
+    chapter_id = getattr(chapter_obj, "id", None) or getattr(chapter_obj, "_id", None)
+    if chapter_id and chapter_id not in tag_ids:
+        tag_ids.append(chapter_id)
+
+    if subject_api_id and tag_ids and hasattr(batch_api, "get_batch_chapter_lectures_v3"):
+        for tag_id in tag_ids:
+            v3_lectures = batch_api.get_batch_chapter_lectures_v3(
+                batch_id=batch_id,
+                subject_id=subject_api_id,
+                tag_id=tag_id,
+            )
+            if v3_lectures:
+                return v3_lectures
+        debugger.warning("v3 tagId returned 0 lectures; falling back to v2 tag-name filter.")
+    if not subject_api_id or not tag_ids:
+        debugger.warning("Missing subjectId/tagId; falling back to v2 tag-name filter.")
+
+    v2_lectures = batch_api.get_batch_chapters(
+        batch_name=batch_slug,
+        subject_name=subject_slug,
+        chapter_name=getattr(chapter_obj, "name", None) or str(chapter_obj),
+    )
+    chapter_name = getattr(chapter_obj, "name", None)
+    if chapter_name:
+        filtered = _filter_lectures_by_tag_name(v2_lectures, chapter_name)
+        if filtered:
+            return filtered
+        if v2_lectures:
+            debugger.warning("v2 tag-name filter returned 0 matches; returning empty list to avoid wrong lectures.")
+        return []
+    return v2_lectures
 
 def _get_env_text(var_name):
     value = os.getenv(var_name)
@@ -829,11 +821,41 @@ def _pyrogram_upload(file_path, caption=None, as_video=False, progress_callback=
         return {"ok": False, "error": str(e)}
 
 def upload_to_telegram(file_path, caption=None, thumb_path=None, as_video=False, progress_callback=None):
+    """Try a faster MTProto backend first (if configured), then fall back to Pyrogram bot upload."""
     is_video_ext = isinstance(file_path, str) and file_path.lower().endswith(
         (".mp4", ".mkv", ".webm", ".mov", ".avi")
     )
     as_video_effective = as_video or is_video_ext
-    # Always use Pyrogram for Bot API file_id
+
+    preferred = os.environ.get("TELEGRAM_PREFERRED_BACKEND", "auto").lower()
+    try_mtproto = False
+    if preferred == 'auto' or 'telethon' in preferred or 'tdlib' in preferred or 'tdlight' in preferred:
+        try_mtproto = True
+
+    # Attempt Telethon MTProto (via mtproto_batch_upload) first when allowed
+    if try_mtproto:
+        try:
+            from mainLogic.utils.telegram_uploader import mtproto_batch_upload
+
+            chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+            session = os.environ.get("TELETHON_SESSION", "telethon_session")
+            # Allow configuring MTProto concurrency via env `TELEGRAM_UPLOAD_WORKERS` (falls back to 4)
+            try:
+                _mt_conc = int(os.environ.get("TELEGRAM_UPLOAD_WORKERS", "4"))
+            except Exception:
+                _mt_conc = 4
+            results = asyncio.run(mtproto_batch_upload([file_path], chat_id=chat_id, session_name=session, concurrency=_mt_conc))
+            if results and isinstance(results, list) and results[0].get('ok'):
+                r = results[0]
+                return {
+                    "method": "telethon",
+                    "status_code": 200,
+                    "data": {"ok": True, "result": {"chat": {"id": r.get('chat_id')}, "message_id": r.get('message_id')}},
+                }
+        except Exception as e:
+            print(f"[VID_DL] mtproto attempt failed: {e}")
+
+    # Fallback: use Pyrogram bot upload (existing path)
     pyrogram_resp = _pyrogram_upload(
         file_path,
         caption=caption,
@@ -886,11 +908,11 @@ def process_lecture_download_upload(lecture, lecture_name, subject_slug, subject
             # batch_slug is the user-provided batch slug in scope
             lec_detail = None
             try:
-                lec_detail = ScraperModule.batch_api.get_batch_lectures(lecture.id, batch_slug)
+                lec_detail = batch_api.get_batch_lectures(lecture.id, batch_slug)
             except Exception:
                 # Some API wrappers expect (lecture_id, batch_name) ordering or different method
                 try:
-                    lec_detail = ScraperModule.batch_api.get_batch_lectures(lecture.id, batch_name=batch_slug)
+                    lec_detail = batch_api.get_batch_lectures(lecture.id, batch_name=batch_slug)
                 except Exception:
                     lec_detail = None
             if lec_detail:
@@ -916,10 +938,10 @@ def process_lecture_download_upload(lecture, lecture_name, subject_slug, subject
             debugger.debug(f"Teacher name resolution via API failed: {e}")
 
     if db_logger:
-        if not getattr(args, 'force_reupload', False) and db_logger.is_upload_done(batch_id, lecture.id):
+        if not force_reupload and db_logger.is_upload_done(batch_id, lecture.id):
             debugger.info("  Skipping: already uploaded (DB shows done).")
             return
-    elif lecture_cache_id and not getattr(args, 'force_reupload', False) and _local_is_upload_done(batch_id, lecture_cache_id):
+    elif lecture_cache_id and not force_reupload and _local_is_upload_done(batch_id, lecture_cache_id):
         debugger.info("  Skipping: already uploaded (local cache).")
         return
         course_row_id = db_logger.upsert_course(
@@ -1165,10 +1187,39 @@ def process_lecture_download_upload(lecture, lecture_name, subject_slug, subject
                 if db_logger:
                     db_logger.mark_status(batch_id, lecture.id, "failed", error=error_text, file_path=file_path)
                 debugger.error(f"  Telegram upload failed: {error_text}")
+                # If configured to delete after upload, remove the local file to avoid filling storage
+                if delete_after_upload and file_path and os.path.exists(file_path):
+                    try:
+                        os.remove(file_path)
+                    except Exception as e:
+                        debugger.error(f"  Failed to delete file after failed upload: {e}")
+                    else:
+                        debugger.info(f"  Deleted local file after failed upload: {file_path}")
+                        if db_logger:
+                            try:
+                                db_logger.mark_status(batch_id, lecture.id, "failed", file_path=None, file_size=None)
+                            except Exception as e:
+                                debugger.error(f"  Failed to clear file_path in DB after deletion: {e}")
         except Exception as e:
+            err_text = str(e)
+            is_flood_wait = "FLOOD_WAIT" in err_text or "FloodWait" in err_text
             if db_logger:
-                db_logger.mark_status(batch_id, lecture.id, "failed", error=str(e), file_path=file_path)
+                status = "pending" if is_flood_wait else "failed"
+                db_logger.mark_status(batch_id, lecture.id, status, error=err_text, file_path=file_path)
             debugger.error(f"  Telegram upload failed: {e}")
+            # If FloodWait, keep file for retry; otherwise delete if configured
+            if delete_after_upload and file_path and os.path.exists(file_path) and not is_flood_wait:
+                try:
+                    os.remove(file_path)
+                except Exception as ex_del:
+                    debugger.error(f"  Failed to delete file after upload exception: {ex_del}")
+                else:
+                    debugger.info(f"  Deleted local file after upload exception: {file_path}")
+                    if db_logger:
+                        try:
+                            db_logger.mark_status(batch_id, lecture.id, "failed", file_path=None, file_size=None)
+                        except Exception as e:
+                            debugger.error(f"  Failed to clear file_path in DB after deletion: {e}")
     else:
         if db_logger:
             try:
@@ -1250,98 +1301,103 @@ for subj in all_subjects or []:
         if t_ids or t_names:
             subject_teacher_map[sslug] = {"ids": t_ids, "names": t_names, "id_to_name": id_to_name}
 
-# If interactive selection beyond batch was requested, build a selection map
+# Interactive selection beyond batch
 selection_map = {}
-if args.select:
-    print("Available subjects:")
-    for idx, subj in enumerate(all_subjects, start=1):
-        print(f"{idx}. {getattr(subj,'slug', '')}")
-    subj_choice = input("Enter subject number(s) comma-separated, or 'all' to pick all (required): ").strip()
-    if not subj_choice:
-        debugger.error("No subject selected. Use 'all' to select all subjects.")
-        exit()
-    elif subj_choice.lower() == 'all':
-        subjects_to_select = all_subjects
-        interactive_auto_all = True
+print("Available subjects:")
+for idx, subj in enumerate(all_subjects, start=1):
+    print(f"{idx}. {getattr(subj,'slug', '')}")
+subj_choice = input("Enter subject number(s) comma-separated, or 'all' to pick all (required): ").strip()
+if not subj_choice:
+    debugger.error("No subject selected. Use 'all' to select all subjects.")
+    exit()
+elif subj_choice.lower() == 'all':
+    subjects_to_select = all_subjects
+    interactive_auto_all = True
+else:
+    interactive_auto_all = False
+    subjects_to_select = []
+    for part in subj_choice.split(','):
+        try:
+            i = int(part.strip()) - 1
+            if 0 <= i < len(all_subjects):
+                subjects_to_select.append(all_subjects[i])
+        except ValueError:
+            continue
+
+for subj in subjects_to_select:
+    sslug = getattr(subj, 'slug', None)
+    if not sslug:
+        continue
+    selection_map[sslug] = {}
+    chapters = batch_api.get_batch_subjects(batch_name=batch_slug, subject_name=sslug)
+    if not chapters:
+        continue
+    print(f"\nChapters for subject {sslug}:")
+    for cidx, ch in enumerate(chapters, start=1):
+        print(f"{cidx}. {getattr(ch,'name','')} (videos={getattr(ch,'videos',0)})")
+    ch_choice = input("Enter chapter number(s) comma-separated, or 'all' to pick all chapters: ").strip()
+    if interactive_auto_all or (not ch_choice) or ch_choice.lower() == 'all':
+        chosen_chapters = [ch for ch in chapters if getattr(ch,'videos',0) > 0]
     else:
-        interactive_auto_all = False
-        subjects_to_select = []
-        for part in subj_choice.split(','):
+        chosen_chapters = []
+        for part in ch_choice.split(','):
             try:
-                i = int(part.strip()) - 1
-                if 0 <= i < len(all_subjects):
-                    subjects_to_select.append(all_subjects[i])
+                ci = int(part.strip()) - 1
+                if 0 <= ci < len(chapters):
+                    if getattr(chapters[ci],'videos',0) > 0:
+                        chosen_chapters.append(chapters[ci])
             except ValueError:
                 continue
 
-    # If user chose 'all' at subject prompt or used --all-lectures, auto-select all chapters/lectures
-    for subj in subjects_to_select:
-        sslug = getattr(subj, 'slug', None)
-        if not sslug:
+    selection_map[sslug]['chapters'] = {}
+    for chapter in chosen_chapters:
+        ch_name = chapter.name
+        print(f"\nLectures in chapter: {ch_name}")
+        lectures = _fetch_chapter_lectures(
+            batch_api,
+            batch_id,
+            batch_slug,
+            subj,
+            sslug,
+            chapter,
+        )
+        if not lectures:
+            print("  (no lectures)")
             continue
-        selection_map[sslug] = {}
-        chapters = batch_api.get_batch_subjects(batch_name=batch_slug, subject_name=sslug)
-        if not chapters:
-            continue
-        print(f"\nChapters for subject {sslug}:")
-        for cidx, ch in enumerate(chapters, start=1):
-            print(f"{cidx}. {getattr(ch,'name','')} (videos={getattr(ch,'videos',0)})")
-        ch_choice = input("Enter chapter number(s) comma-separated, or 'all' to pick all chapters: ").strip()
-        if args.all_lectures or interactive_auto_all or (not ch_choice) or ch_choice.lower() == 'all':
-            chosen_chapters = [ch.name for ch in chapters if getattr(ch,'videos',0) > 0]
+        for lidx, lec in enumerate(lectures, start=1):
+            title = getattr(lec,'name', None) or (lec.id if hasattr(lec,'id') else '<no-id>')
+            tstr = getattr(lec,'startTime', None)
+            if tstr:
+                tdisp = tstr.strftime('%d-%m-%Y %H:%M')
+            else:
+                tdisp = 'unknown'
+            print(f"  {lidx}. {title} | {tdisp} | id={getattr(lec,'id','')}")
+        if interactive_auto_all:
+            selection_map[sslug]['chapters'][ch_name] = {'all': True}
         else:
-            chosen_chapters = []
-            for part in ch_choice.split(','):
-                try:
-                    ci = int(part.strip()) - 1
-                    if 0 <= ci < len(chapters):
-                        if getattr(chapters[ci],'videos',0) > 0:
-                            chosen_chapters.append(chapters[ci].name)
-                except ValueError:
-                    continue
-        # for each chosen chapter, ask whether download all or pick lectures
-        selection_map[sslug]['chapters'] = {}
-        for ch_name in chosen_chapters:
-            print(f"\nLectures in chapter: {ch_name}")
-            lectures = batch_api.get_batch_chapters(batch_name=batch_slug, subject_name=sslug, chapter_name=ch_name)
-            if not lectures:
-                print("  (no lectures)")
-                continue
-            for lidx, lec in enumerate(lectures, start=1):
-                title = getattr(lec,'name', None) or (lec.id if hasattr(lec,'id') else '<no-id>')
-                tstr = getattr(lec,'startTime', None)
-                if tstr:
-                    tdisp = tstr.strftime('%d-%m-%Y %H:%M')
-                else:
-                    tdisp = 'unknown'
-                print(f"  {lidx}. {title} | {tdisp} | id={getattr(lec,'id','')}")
-            # If global --all-lectures or user selected 'all' earlier, auto-select all lectures without prompting
-            if args.all_lectures or interactive_auto_all:
+            allq = input("Download ALL lectures from this chapter? (y/N): ").strip().lower()
+            if allq == 'y':
                 selection_map[sslug]['chapters'][ch_name] = {'all': True}
             else:
-                allq = input("Download ALL lectures from this chapter? (y/N): ").strip().lower()
-                if allq == 'y':
-                    selection_map[sslug]['chapters'][ch_name] = {'all': True}
-                else:
-                    nums = input("Enter lecture number(s) comma-separated to download, or press Enter to skip: ").strip()
-                    chosen_ids = []
-                    if nums:
-                        for part in nums.split(','):
-                            try:
-                                li = int(part.strip()) - 1
-                                if 0 <= li < len(lectures):
-                                    chosen_ids.append(lectures[li].id)
-                            except ValueError:
-                                continue
-                    if chosen_ids:
-                        selection_map[sslug]['chapters'][ch_name] = {'all': False, 'ids': chosen_ids}
+                nums = input("Enter lecture number(s) comma-separated to download, or press Enter to skip: ").strip()
+                chosen_ids = []
+                if nums:
+                    for part in nums.split(','):
+                        try:
+                            li = int(part.strip()) - 1
+                            if 0 <= li < len(lectures):
+                                chosen_ids.append(lectures[li].id)
+                        except ValueError:
+                            continue
+                if chosen_ids:
+                    selection_map[sslug]['chapters'][ch_name] = {'all': False, 'ids': chosen_ids}
 
 
 # Define UTC timezone for consistency
 UTC = timezone.utc # Python 3.2+ recommended way for UTC
 
 # Decide which subjects to iterate (interactive selection may limit this)
-if args.select and selection_map:
+if selection_map:
     subjects_iter = [s for s in all_subjects if getattr(s, 'slug', None) in selection_map]
 else:
     subjects_iter = all_subjects
@@ -1364,22 +1420,23 @@ for subject in subjects_iter:
     
     # Iterate through all chapters to collect all relevant lectures
     for chapter in chapters_in_subject:
-        if args.chapter and chapter.name != args.chapter:
-            continue
         if not (chapter.name and chapter.videos > 0):
             continue
         # If interactive selection used, skip chapters not selected
-        if args.select and subject.slug in selection_map:
+        if subject.slug in selection_map:
             selected_chapters = selection_map[subject.slug].get('chapters', {})
             if chapter.name not in selected_chapters:
                 continue
-        lectures_in_chapter = batch_api.get_batch_chapters(
-            batch_name=batch_slug,
-            subject_name=subject.slug,
-            chapter_name=chapter.name
+        lectures_in_chapter = _fetch_chapter_lectures(
+            batch_api,
+            batch_id,
+            batch_slug,
+            subject,
+            subject.slug,
+            chapter,
         )
         # Add chapter_name to each lecture object for downloader context
-        if args.select and subject.slug in selection_map:
+        if subject.slug in selection_map:
             chap_sel = selection_map[subject.slug]['chapters'].get(chapter.name, {})
             if chap_sel.get('all'):
                 for idx, lecture in enumerate(lectures_in_chapter, start=1):
@@ -1402,90 +1459,22 @@ for subject in subjects_iter:
                 lecture.chapter_total = len(lectures_in_chapter)
                 all_lectures_in_subject.append(lecture)
 
-    # --- Sort and Filter Lectures ---
-    filtered_lectures = []
+    # Sort lectures by start time in descending order (latest first)
+    sorted_lectures = sorted(all_lectures_in_subject, key=attrgetter('startTime'), reverse=True)
 
-    if specific_date_filter_utc:
-        # Filter by specific date first
-        target_date_utc_end = specific_date_filter_utc + timedelta(days=1) # Midnight of next day
-        for lecture in all_lectures_in_subject:
-            if lecture.startTime and \
-               specific_date_filter_utc <= lecture.startTime < target_date_utc_end:
-                filtered_lectures.append(lecture)
-        if not filtered_lectures:
-            debugger.warning(f"No lectures found for subject '{subject.slug}' on date {args.date}.")
-            continue # Skip to next subject if no lectures found on specified date
-    else:
-        # If no specific date, consider all collected lectures
-        filtered_lectures = all_lectures_in_subject
+    if not sorted_lectures:
+        debugger.warning(f"No lectures found for subject: {subject.slug}.")
+        continue
 
-    # Sort the filtered lectures by start time in descending order (latest first)
-    # Using attrgetter is efficient for sorting by an attribute
-    sorted_lectures = sorted(filtered_lectures, key=attrgetter('startTime'), reverse=True)
-
-    selected_lecture = None
-    if args.lecture_id:
-        for lecture in sorted_lectures:
-            if lecture.id == args.lecture_id:
-                selected_lecture = lecture
-                debugger.info(f"Selected lecture ID {args.lecture_id}.")
-                break
-        if not selected_lecture:
-            debugger.warning(f"Lecture ID {args.lecture_id} not found.")
-            continue
-    elif args.latest_nth is not None:
-        if 0 <= args.latest_nth < len(sorted_lectures):
-            selected_lecture = sorted_lectures[args.latest_nth]
-            debugger.info(f"Selected {args.latest_nth}th latest lecture for subject '{subject.slug}'.")
-        else:
-            debugger.warning(f"Requested {args.latest_nth}th latest lecture, but only {len(sorted_lectures)} lectures found for subject '{subject.slug}' after date filter (if any).")
-            continue # Skip to next subject if nth latest doesn't exist
-    elif sorted_lectures and not args.all_lectures: # If no -n is provided, and there are lectures, just pick the very latest
-        selected_lecture = sorted_lectures[0]
-        debugger.info(f"No --latest-nth specified. Picking the very latest lecture for subject '{subject.slug}'.")
-
-    process_all_selected = bool(args.select and selection_map)
-
-    if process_all_selected and sorted_lectures:
-        for lecture in sorted_lectures:
-            debugger.info(f"Processing lecture for subject '{subject.slug}':")
-            lecture_name = get_lecture_display_name(lecture)
-            debugger.info(f"  Name: {lecture_name}")
-            if lecture.startTime:
-                debugger.info(f"  Start Time: {lecture.startTime.strftime('%d-%m-%Y %H:%M:%S %Z')}")
-            debugger.info(f"  Batch Name: {batch_slug}")
-            debugger.info(f"  Lecture ID: {lecture.id}")
-            try:
-                process_lecture_download_upload(lecture, lecture_name, subject.slug, subject_name)
-            except RuntimeError:
-                break
-    elif args.all_lectures and sorted_lectures:
-        for lecture in sorted_lectures:
-            debugger.info(f"Processing lecture for subject '{subject.slug}':")
-            lecture_name = get_lecture_display_name(lecture)
-            debugger.info(f"  Name: {lecture_name}")
-            if lecture.startTime:
-                debugger.info(f"  Start Time: {lecture.startTime.strftime('%d-%m-%Y %H:%M:%S %Z')}")
-            debugger.info(f"  Batch Name: {batch_slug}")
-            debugger.info(f"  Lecture ID: {lecture.id}")
-            debugger.info(f"  Attempting to download lecture...")
-            try:
-                process_lecture_download_upload(lecture, lecture_name, subject.slug, subject_name)
-            except RuntimeError:
-                break
-    elif selected_lecture:
-        debugger.info(f"Processing selected lecture for subject '{subject.slug}':")
-        lecture_name = get_lecture_display_name(selected_lecture)
+    for lecture in sorted_lectures:
+        debugger.info(f"Processing lecture for subject '{subject.slug}':")
+        lecture_name = get_lecture_display_name(lecture)
         debugger.info(f"  Name: {lecture_name}")
-        debugger.info(f"  Start Time: {selected_lecture.startTime.strftime('%d-%m-%Y %H:%M:%S %Z')}")
+        if lecture.startTime:
+            debugger.info(f"  Start Time: {lecture.startTime.strftime('%d-%m-%Y %H:%M:%S %Z')}")
         debugger.info(f"  Batch Name: {batch_slug}")
-        debugger.info(f"  Lecture ID: {selected_lecture.id}")
-        if download_enabled:
-            debugger.info(f"  Attempting to download lecture...")
-            try:
-                process_lecture_download_upload(selected_lecture, lecture_name, subject.slug, subject_name)
-            except RuntimeError:
-                pass
-        
-    else:
-        debugger.warning(f"No lectures found for subject: {subject.slug} that match the applied filters.")
+        debugger.info(f"  Lecture ID: {lecture.id}")
+        try:
+            process_lecture_download_upload(lecture, lecture_name, subject.slug, subject_name)
+        except RuntimeError:
+            break

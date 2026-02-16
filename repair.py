@@ -27,6 +27,16 @@ try:
 except Exception:
     dbmod = None
 
+try:
+    from mainLogic.utils.glv_var import PREFS_FILE
+except Exception:
+    PREFS_FILE = "preferences.json"
+
+try:
+    from beta.batch_scraper_2.Endpoints import Endpoints
+except Exception:
+    Endpoints = None
+
 from telethon import TelegramClient
 from contextlib import contextmanager
 
@@ -72,6 +82,29 @@ def _parse_caption(text):
             if m:
                 teacher = m.group(1).strip()
     return {"subject": subject, "chapter": chapter, "lecture": lecture, "teacher": teacher}
+
+
+def _build_caption_from_db(payload, fallback_caption=None):
+    if not payload:
+        return fallback_caption or ""
+    course = payload.get("course_name") or payload.get("batch_slug") or payload.get("batch_id") or ""
+    subject = payload.get("subject_name") or payload.get("subject_slug") or ""
+    chapter = payload.get("chapter_name") or ""
+    lecture = payload.get("lecture_name") or ""
+    teacher = payload.get("teacher_names") or ""
+    start_time = payload.get("start_time") or ""
+
+    lines = [
+        f"Course : {course}",
+        f"Subject: {subject}",
+        f"Chapter: {chapter}",
+        f"Lecture: {lecture}",
+    ]
+    if teacher:
+        lines.append(f"Teacher: {teacher}")
+    if start_time:
+        lines.append(f"Start  : {start_time}")
+    return "\n".join([ln for ln in lines if ln.strip()])
 
 
 def _ensure_teacher_in_caption(caption, teacher_name):
@@ -126,6 +159,75 @@ def _connect_db():
         database=p.path.lstrip("/"),
         port=p.port or 3306,
     )
+
+
+def _table_exists(conn, table_name):
+    try:
+        with get_cursor(conn, dict=False) as cur:
+            cur.execute(
+                """
+                SELECT COUNT(*)
+                FROM INFORMATION_SCHEMA.TABLES
+                WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s
+                """,
+                (table_name,),
+            )
+            return cur.fetchone()[0] > 0
+    except Exception:
+        return False
+
+
+def _load_token_config():
+    try:
+        with open(PREFS_FILE, "r", encoding="utf-8") as handle:
+            prefs = json.load(handle)
+    except Exception:
+        return {}
+    token = prefs.get("token_config") or prefs.get("token") or {}
+    if isinstance(token, dict):
+        return token
+    return {}
+
+
+def _init_api():
+    if Endpoints is None:
+        return None
+    token_cfg = _load_token_config()
+    access_token = token_cfg.get("access_token") or token_cfg.get("token")
+    random_id = token_cfg.get("random_id") or token_cfg.get("randomId")
+    if not access_token:
+        return None
+    if random_id:
+        return Endpoints(verbose=False).set_token(access_token, random_id=random_id)
+    return Endpoints(verbose=False).set_token(access_token)
+
+
+def _normalize_tag_name(value):
+    if not value:
+        return ""
+    return re.sub(r"\s+", " ", str(value)).strip().lower()
+
+
+def _filter_lectures_by_tag_name(lectures, chapter_name):
+    if not lectures:
+        return []
+    target = _normalize_tag_name(chapter_name)
+    if not target:
+        return []
+    filtered = []
+    for lecture in lectures:
+        tags = getattr(lecture, "tags", None) or []
+        for tag in tags:
+            tag_name = _normalize_tag_name(getattr(tag, "name", None))
+            if tag_name == target:
+                filtered.append(lecture)
+                break
+    return filtered
+
+
+def _safe_str(value):
+    text = str(value).strip() if value is not None else ""
+    return text or None
 
 
 def perform_status_fix(conn, dry_run=False):
@@ -193,7 +295,7 @@ def perform_clear_failed(conn, dry_run=False):
     return results
 
 
-async def main(use_user=False, chat_id=None, dry_run=False, limit=None):
+async def main(use_user=False, chat_id=None, dry_run=False, limit=None, repair_uploaded=False):
     conn = _connect_db()
 
     api_id = int(os.environ.get("TELEGRAM_API_ID", 0))
@@ -214,10 +316,7 @@ async def main(use_user=False, chat_id=None, dry_run=False, limit=None):
 
     # gather candidate message refs from backup_id, lecture_uploads, lecture_jobs
     candidates = set()
-    try:
-        has_backup = dbmod.table_exists(conn, 'backup_id') if dbmod else True
-    except Exception:
-        has_backup = True
+    has_backup = _table_exists(conn, 'backup_id')
 
     with get_cursor(conn, dict=True) as cur:
         if has_backup:
@@ -289,12 +388,50 @@ async def main(use_user=False, chat_id=None, dry_run=False, limit=None):
             conn.commit()
             continue
 
-        # message exists -> attempt metadata repair
+        # message exists -> attempt metadata repair and status repair
         caption = getattr(msg, 'message', None) or getattr(msg, 'text', None) or ''
         parsed = _parse_caption(caption)
         if not any(parsed.values()):
             print("  message present but no parseable caption metadata")
-            continue
+
+        if repair_uploaded and not dry_run:
+            with get_cursor(conn, dict=False) as cur:
+                try:
+                    cur.execute(
+                        """
+                        UPDATE lecture_uploads
+                        SET status='done', error_text=NULL,
+                            telegram_chat_id=%s, telegram_message_id=%s
+                        WHERE batch_id=%s AND lecture_id=%s
+                        """,
+                        (chat_k, msg_k, batch_id, lecture_id),
+                    )
+                except Exception:
+                    pass
+                try:
+                    cur.execute(
+                        """
+                        UPDATE lecture_jobs
+                        SET status='done', error_text=NULL,
+                            telegram_chat_id=%s, telegram_message_id=%s
+                        WHERE batch_id=%s AND lecture_id=%s
+                        """,
+                        (chat_k, msg_k, batch_id, lecture_id),
+                    )
+                except Exception:
+                    pass
+                try:
+                    cur.execute(
+                        """
+                        UPDATE backup_id
+                        SET message_id=%s
+                        WHERE batch_id=%s AND lecture_id=%s AND platform='telegram'
+                        """,
+                        (msg_k, batch_id, lecture_id),
+                    )
+                except Exception:
+                    pass
+            conn.commit()
 
         # fetch current lecture row
         with get_cursor(conn, dict=True) as cur:
@@ -352,8 +489,166 @@ async def main(use_user=False, chat_id=None, dry_run=False, limit=None):
                         print(f"  update failed: {e}")
                 conn.commit()
 
+        # Rebuild Telegram caption from DB if requested
+        if repair_uploaded and not dry_run:
+            payload = None
+            with get_cursor(conn, dict=True) as cur:
+                try:
+                    cur.execute(
+                        """
+                        SELECT
+                            l.batch_id,
+                            c.batch_slug,
+                            c.name AS course_name,
+                            s.slug AS subject_slug,
+                            s.name AS subject_name,
+                            ch.name AS chapter_name,
+                            l.lecture_name,
+                            l.start_time,
+                            GROUP_CONCAT(t.name ORDER BY t.name SEPARATOR ', ') AS teacher_names
+                        FROM lectures l
+                        LEFT JOIN courses c ON c.id = l.course_id
+                        LEFT JOIN subjects s ON s.id = l.subject_id
+                        LEFT JOIN chapters ch ON ch.id = l.chapter_id
+                        LEFT JOIN lecture_teachers lt ON lt.batch_id = l.batch_id AND lt.lecture_id = l.lecture_id
+                        LEFT JOIN teachers t ON t.id = lt.teacher_id
+                        WHERE l.batch_id = %s AND l.lecture_id = %s
+                        GROUP BY l.batch_id, c.batch_slug, c.name, s.slug, s.name, ch.name, l.lecture_name, l.start_time
+                        """,
+                        (batch_id, lecture_id),
+                    )
+                    payload = cur.fetchone()
+                except Exception:
+                    payload = None
+            new_caption = _build_caption_from_db(payload, fallback_caption=caption)
+            if new_caption and new_caption != (caption or ""):
+                try:
+                    await client.edit_message(int(chat_k), int(msg_k), new_caption)
+                    print(f"  updated caption for message {msg_k}")
+                except Exception as e:
+                    print(f"  failed to update caption {msg_k}: {e}")
+
     await client.disconnect()
     conn.close()
+
+
+def sync_chapters_from_api(conn, batch_id=None, batch_slug=None, dry_run=False):
+    api = _init_api()
+    if api is None:
+        print("API token not available; cannot sync chapters.")
+        return
+
+    batches = []
+    if batch_id or batch_slug:
+        batches.append({"batch_id": batch_id, "batch_slug": batch_slug})
+    else:
+        with get_cursor(conn, dict=True) as cur:
+            if _table_exists(conn, "courses"):
+                cur.execute("SELECT batch_id, batch_slug FROM courses")
+                batches = cur.fetchall() or []
+            else:
+                cur.execute("SELECT DISTINCT batch_id, batch_slug FROM lecture_jobs")
+                batches = cur.fetchall() or []
+
+    for b in batches:
+        b_id = b.get("batch_id") if isinstance(b, dict) else None
+        b_slug = b.get("batch_slug") if isinstance(b, dict) else None
+        if batch_id:
+            b_id = batch_id
+        if batch_slug:
+            b_slug = batch_slug
+        if not b_slug:
+            print(f"Skipping batch without slug: batch_id={b_id}")
+            continue
+
+        print(f"Syncing chapters for batch: {b_slug} ({b_id})")
+        try:
+            subjects = api.get_batch_details(batch_name=b_slug)
+        except Exception as e:
+            print(f"  Failed to load subjects: {e}")
+            continue
+
+        for subj in subjects or []:
+            subject_slug = getattr(subj, "slug", None)
+            subject_name = getattr(subj, "name", None) or subject_slug
+            subject_id = getattr(subj, "subjectId", None) or getattr(subj, "id", None) or getattr(subj, "_id", None)
+            if not subject_slug:
+                continue
+            try:
+                chapters = api.get_batch_subjects(batch_name=b_slug, subject_name=subject_slug)
+            except Exception:
+                chapters = []
+
+            for chapter in chapters or []:
+                chapter_name = getattr(chapter, "name", None)
+                if not chapter_name:
+                    continue
+                tag_id = getattr(chapter, "typeId", None) or getattr(chapter, "id", None) or getattr(chapter, "_id", None)
+                lectures = []
+                if b_id and subject_id and tag_id and hasattr(api, "get_batch_chapter_lectures_v3"):
+                    try:
+                        lectures = api.get_batch_chapter_lectures_v3(
+                            batch_id=b_id,
+                            subject_id=subject_id,
+                            tag_id=tag_id,
+                        )
+                    except Exception:
+                        lectures = []
+                if not lectures:
+                    try:
+                        v2 = api.get_batch_chapters(batch_name=b_slug, subject_name=subject_slug, chapter_name=chapter_name)
+                        lectures = _filter_lectures_by_tag_name(v2, chapter_name)
+                    except Exception:
+                        lectures = []
+
+                for lec in lectures:
+                    lecture_id = _safe_str(getattr(lec, "id", None))
+                    lecture_name = _safe_str(getattr(lec, "name", None))
+                    if not lecture_id:
+                        continue
+                    if dry_run:
+                        print(f"  would update lecture {lecture_id} chapter={chapter_name}")
+                        continue
+                    with get_cursor(conn, dict=False) as cur:
+                        try:
+                            cur.execute(
+                                """
+                                UPDATE lectures
+                                SET subject_slug=%s, subject_name=%s, chapter_name=%s,
+                                    lecture_name=COALESCE(NULLIF(%s,''), lecture_name)
+                                WHERE batch_id=%s AND lecture_id=%s
+                                """,
+                                (
+                                    subject_slug,
+                                    subject_name,
+                                    chapter_name,
+                                    lecture_name or "",
+                                    b_id,
+                                    lecture_id,
+                                ),
+                            )
+                        except Exception:
+                            pass
+                        try:
+                            cur.execute(
+                                """
+                                UPDATE lecture_jobs
+                                SET subject_slug=%s, subject_name=%s, chapter_name=%s,
+                                    lecture_name=COALESCE(NULLIF(%s,''), lecture_name)
+                                WHERE batch_id=%s AND lecture_id=%s
+                                """,
+                                (
+                                    subject_slug,
+                                    subject_name,
+                                    chapter_name,
+                                    lecture_name or "",
+                                    b_id,
+                                    lecture_id,
+                                ),
+                            )
+                        except Exception:
+                            pass
+                    conn.commit()
 
 
 if __name__ == '__main__':
@@ -364,6 +659,11 @@ if __name__ == '__main__':
     parser.add_argument('--fix-status-typos', action='store_true', help="Fix status typos ('field','feild') -> 'uploaded'")
     parser.add_argument('--clear-failed', action='store_true', help="Clear lecture_uploads rows with status 'failed' (set to pending and clear telegram refs)")
     parser.add_argument('--limit', type=int, default=None)
+    parser.add_argument('--repair-uploaded', action='store_true', help='If message exists, mark DB rows as done and ensure telegram ids are set')
+    parser.add_argument('--rebuild-captions', action='store_true', help='Rebuild Telegram captions from DB fields')
+    parser.add_argument('--sync-chapters', action='store_true', help='Fetch lecture -> chapter mapping from API and update DB')
+    parser.add_argument('--batch-id', help='Optional batch_id to restrict sync')
+    parser.add_argument('--batch-slug', help='Optional batch slug to restrict sync')
     args = parser.parse_args()
 
     if args.fix_status_typos:
@@ -380,5 +680,9 @@ if __name__ == '__main__':
         for t, c in res.items():
             print(f"  {t}: {c} rows {'(would be cleared)' if args.dry_run else '(cleared)'}")
         conn.close()
+    elif args.sync_chapters:
+        conn = _connect_db()
+        sync_chapters_from_api(conn, batch_id=args.batch_id, batch_slug=args.batch_slug, dry_run=args.dry_run)
+        conn.close()
     else:
-        asyncio.run(main(use_user=args.use_user_session, chat_id=args.chat_id, dry_run=args.dry_run, limit=args.limit))
+        asyncio.run(main(use_user=args.use_user_session, chat_id=args.chat_id, dry_run=args.dry_run, limit=args.limit, repair_uploaded=args.repair_uploaded or args.rebuild_captions))

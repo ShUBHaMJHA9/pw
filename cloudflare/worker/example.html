@@ -1,0 +1,16 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Worker Stream Example</title>
+  </head>
+  <body>
+    <h3>Video via Cloudflare Worker (proxy)</h3>
+    <!-- Replace <WORKER_URL> with your deployed worker URL and <UPSTREAM_URL> with a video file -->
+    <video controls width="640">
+      <source src="<WORKER_URL>/?mode=proxy&url=<UPSTREAM_URL>" type="video/mp4">
+      Your browser does not support the video tag.
+    </video>
+    <p>Or use `mode=redirect` to let the client fetch from origin directly.</p>
+  </body>
+</html>

@@ -723,28 +723,52 @@ def mark_status(batch_id, lecture_id, status, file_path=None, file_size=None, er
     conn = _connect()
     try:
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                UPDATE lecture_jobs
-                SET status=%s, error_text=%s, telegram_chat_id=COALESCE(%s, telegram_chat_id), telegram_message_id=COALESCE(%s, telegram_message_id), telegram_file_id=COALESCE(%s, telegram_file_id)
-                WHERE batch_id=%s AND lecture_id=%s
-                """,
-                (status, error, telegram_chat_id, telegram_message_id, telegram_file_id, batch_id, lecture_id),
-            )
-            cur.execute(
-                """
-                UPDATE lecture_uploads
-                SET status=%s,
-                    file_path=%s,
-                    file_size=%s,
-                    error_text=%s,
-                    telegram_chat_id=%s,
-                    telegram_message_id=%s,
-                    telegram_file_id=%s
-                WHERE batch_id=%s AND lecture_id=%s
-                """,
-                (status, file_path, file_size, error, telegram_chat_id, telegram_message_id, telegram_file_id, batch_id, lecture_id),
-            )
+            if status == "failed":
+                cur.execute(
+                    """
+                    UPDATE lecture_jobs
+                    SET status=%s, error_text=%s, telegram_chat_id=NULL, telegram_message_id=NULL, telegram_file_id=NULL
+                    WHERE batch_id=%s AND lecture_id=%s
+                    """,
+                    (status, error, batch_id, lecture_id),
+                )
+                cur.execute(
+                    """
+                    UPDATE lecture_uploads
+                    SET status=%s,
+                        file_path=%s,
+                        file_size=%s,
+                        error_text=%s,
+                        telegram_chat_id=NULL,
+                        telegram_message_id=NULL,
+                        telegram_file_id=NULL
+                    WHERE batch_id=%s AND lecture_id=%s
+                    """,
+                    (status, file_path, file_size, error, batch_id, lecture_id),
+                )
+            else:
+                cur.execute(
+                    """
+                    UPDATE lecture_jobs
+                    SET status=%s, error_text=%s, telegram_chat_id=COALESCE(%s, telegram_chat_id), telegram_message_id=COALESCE(%s, telegram_message_id), telegram_file_id=COALESCE(%s, telegram_file_id)
+                    WHERE batch_id=%s AND lecture_id=%s
+                    """,
+                    (status, error, telegram_chat_id, telegram_message_id, telegram_file_id, batch_id, lecture_id),
+                )
+                cur.execute(
+                    """
+                    UPDATE lecture_uploads
+                    SET status=%s,
+                        file_path=%s,
+                        file_size=%s,
+                        error_text=%s,
+                        telegram_chat_id=%s,
+                        telegram_message_id=%s,
+                        telegram_file_id=%s
+                    WHERE batch_id=%s AND lecture_id=%s
+                    """,
+                    (status, file_path, file_size, error, telegram_chat_id, telegram_message_id, telegram_file_id, batch_id, lecture_id),
+                )
             _maybe_upsert_backup_id(
                 cur,
                 batch_id,

@@ -74,6 +74,127 @@ def _progress_text(title, pct, speed_bps, eta_seconds, sent_bytes, total_bytes):
     )
 
 
+def _sleep_with_backoff(attempt, base=3.0, cap=60.0):
+    delay = min(cap, base * (2 ** max(0, attempt - 1)))
+    return delay
+
+
+def _extract_floodwait_seconds(exc, default=10):
+    # Try common attributes used by different clients
+    for attr in ("seconds", "x", "value", "wait", "wait_seconds"):
+        val = getattr(exc, attr, None)
+        if val is not None:
+            try:
+                return int(val)
+            except Exception:
+                continue
+    # Fallback: try to parse integer from exception string
+    try:
+        import re
+
+        m = re.search(r"(\d{1,6})", str(exc))
+        if m:
+            return int(m.group(1))
+    except Exception:
+        pass
+    return int(default)
+
+
+async def mtproto_batch_upload(file_paths, chat_id=None, session_name=None, concurrency=2):
+    """Batch upload files via Telethon (MTProto) using a single user session.
+
+    - Uses streaming uploads (no full file in memory)
+    - Handles FloodWait with sleep
+    - Exponential backoff retry (max 3)
+    """
+    if not TELEGRAM_API_ID or not TELEGRAM_API_HASH:
+        raise RuntimeError("TELEGRAM_API_ID / TELEGRAM_API_HASH required for Telethon uploads")
+    if not file_paths:
+        return []
+
+    chat_target = _normalize_chat_id(chat_id or TELEGRAM_CHAT_ID)
+    if not chat_target:
+        raise RuntimeError("TELEGRAM_CHAT_ID required")
+
+    from telethon import TelegramClient, errors as telethon_errors
+
+    part_size_kb = _get_int_env("TELEGRAM_UPLOAD_PART_SIZE_KB", 16384)
+    max_retries = _get_int_env("TELEGRAM_UPLOAD_MAX_RETRIES", 3)
+
+    session = session_name or TELETHON_SESSION
+    client = TelegramClient(session, int(TELEGRAM_API_ID), TELEGRAM_API_HASH)
+    # Start client with FloodWait handling to avoid auth.ImportBotAuthorization throttling
+    start_attempts = 0
+    while True:
+        try:
+            await client.start()
+            break
+        except Exception as e:
+            # Telethon exposes FloodWaitError
+            if isinstance(e, getattr(telethon_errors, 'FloodWaitError', ())) or 'FLOOD_WAIT' in str(e) or 'auth.ImportBotAuthorization' in str(e):
+                start_attempts += 1
+                wait_for = _extract_floodwait_seconds(e, default=10)
+                await asyncio.sleep(wait_for)
+                if start_attempts >= 3:
+                    raise
+                continue
+            raise
+
+    results = []
+    sem = asyncio.Semaphore(max(1, int(concurrency)))
+
+    async def _upload_one(path):
+        if not os.path.exists(path):
+            return {"file_path": path, "ok": False, "error": "not_found"}
+        attempts = 0
+        while attempts < max_retries:
+            attempts += 1
+            try:
+                try:
+                    send_timeout = int(os.environ.get("TELEGRAM_SEND_TIMEOUT_SEC", "600"))
+                except Exception:
+                    send_timeout = 600
+                start = time.monotonic()
+                print(f"[mtproto] sending {os.path.basename(path)} timeout={send_timeout}s attempt={attempts}")
+                msg = await asyncio.wait_for(
+                    client.send_file(chat_target, path, part_size_kb=part_size_kb), timeout=send_timeout
+                )
+                elapsed = max(time.monotonic() - start, 0.001)
+                size_mb = os.path.getsize(path) / (1024 * 1024)
+                speed = size_mb / elapsed
+                print(f"[mtproto] {os.path.basename(path)} {speed:.2f} MB/s")
+                return {
+                    "file_path": path,
+                    "ok": True,
+                    "chat_id": getattr(getattr(msg, "chat", None), "id", None),
+                    "message_id": getattr(msg, "id", None),
+                }
+            except asyncio.TimeoutError:
+                print(f"[mtproto] send_file timed out after {send_timeout}s (attempt {attempts})")
+                backoff = _sleep_with_backoff(attempts)
+                await asyncio.sleep(backoff)
+                last_error = f"timeout {send_timeout}s"
+            except telethon_errors.FloodWaitError as e:
+                wait_for = int(getattr(e, "seconds", 10) or 10)
+                await asyncio.sleep(wait_for)
+            except Exception as e:
+                backoff = _sleep_with_backoff(attempts)
+                await asyncio.sleep(backoff)
+                last_error = str(e)
+        return {"file_path": path, "ok": False, "error": last_error}
+
+    async def _task(path):
+        async with sem:
+            return await _upload_one(path)
+
+    tasks = [asyncio.create_task(_task(p)) for p in file_paths]
+    for done in asyncio.as_completed(tasks):
+        results.append(await done)
+
+    await client.disconnect()
+    return results
+
+
 async def _upload_async(file_path, caption=None, as_video=False, progress_callback=None, thumb_path=None, progress_message=False, progress_meta=None):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID or not TELEGRAM_API_ID or not TELEGRAM_API_HASH:
         raise RuntimeError(
@@ -100,7 +221,21 @@ async def _upload_async(file_path, caption=None, as_video=False, progress_callba
             raise RuntimeError("TELEGRAM_API_ID / TELEGRAM_API_HASH required for telethon backend")
 
         client = TelegramClient(TELETHON_SESSION, int(TELEGRAM_API_ID), TELEGRAM_API_HASH)
-        await client.start()
+        # Start client with FloodWait handling
+        start_attempts = 0
+        while True:
+            try:
+                await client.start()
+                break
+            except Exception as e:
+                if isinstance(e, getattr(telethon_errors, 'FloodWaitError', ())) or 'FLOOD_WAIT' in str(e) or 'auth.ImportBotAuthorization' in str(e):
+                    start_attempts += 1
+                    wait_for = _extract_floodwait_seconds(e, default=10)
+                    await asyncio.sleep(wait_for)
+                    if start_attempts >= 3:
+                        raise
+                    continue
+                raise
         if 'tgcrypto' in globals() and globals().get('tgcrypto') is None:
             # warn user that tgcrypto is not installed; it helps performance
             try:
@@ -183,9 +318,13 @@ async def _upload_async(file_path, caption=None, as_video=False, progress_callba
                     progress_callback=_telethon_progress,
                     part_size_kb=part_size_kb,
                 )
-            except telethon_errors.FloodWait as e:
-                await asyncio.sleep(getattr(e, 'seconds', 10) or 10)
-                msg = await client.send_file(chat_target, file_path, caption=caption)
+            except Exception as e:
+                if isinstance(e, getattr(telethon_errors, 'FloodWaitError', ())) or 'FLOOD_WAIT' in str(e):
+                    wait_for = _extract_floodwait_seconds(e, default=10)
+                    await asyncio.sleep(wait_for)
+                    msg = await client.send_file(chat_target, file_path, caption=caption)
+                else:
+                    raise
 
             # Telethon message may contain media info
             file_id = None
@@ -203,6 +342,87 @@ async def _upload_async(file_path, caption=None, as_video=False, progress_callba
         finally:
             await client.disconnect()
 
+    # Optional: TDLib / tdlight backend (very fast, native TDLib engine)
+    if TELEGRAM_BACKEND in ("tdlib", "tdlight"):
+        # Provide a defensive skeleton for TDLib-based uploaders. Actual
+        # integration depends on the specific Python bindings you install
+        # (e.g. python-tdlib, tdlight-py, pytglib). This code tries common
+        # import names and calls a minimal async interface if present.
+        try:
+            # Prefer tdlight wrapper if present
+            from tdlight import TDLightClient as TDClient  # type: ignore
+        except Exception:
+            try:
+                from tdlib import TDLib as TDClient  # type: ignore
+            except Exception:
+                raise RuntimeError(
+                    "TDLib backend selected but no tdlib/tdlight Python bindings found. "
+                    "Install 'python-tdlib' or 'tdlight' and retry."
+                )
+
+        client = None
+        try:
+            # Instantiate client (bindings vary; best-effort call)
+            try:
+                client = TDClient()
+            except TypeError:
+                # Some wrappers require (session, api_id, api_hash)
+                try:
+                    client = TDClient(TELETHON_SESSION, int(TELEGRAM_API_ID or 0), TELEGRAM_API_HASH)
+                except Exception:
+                    client = TDClient()
+
+            # Start client; allow bot token if supported by binding
+            start_attempts = 0
+            while True:
+                try:
+                    if TELEGRAM_BOT_TOKEN and hasattr(client, 'start'):
+                        await client.start(bot_token=TELEGRAM_BOT_TOKEN)
+                    elif hasattr(client, 'start'):
+                        await client.start()
+                    break
+                except Exception as e:
+                    # Use FloodWait helper and cap retries
+                    if 'FLOOD_WAIT' in str(e) or 'auth.ImportBotAuthorization' in str(e):
+                        start_attempts += 1
+                        wait_for = _extract_floodwait_seconds(e, default=10)
+                        await asyncio.sleep(wait_for)
+                        if start_attempts >= 3:
+                            raise
+                        continue
+                    raise
+
+            send_fn = getattr(client, 'send_file', None) or getattr(client, 'sendFile', None)
+            if not send_fn:
+                raise RuntimeError("TDLib binding does not expose a compatible send_file API")
+
+            try:
+                msg = await send_fn(chat_target, file_path, caption=caption, progress_callback=_progress_wrapper)
+            except Exception as e:
+                if 'FLOOD_WAIT' in str(e):
+                    wait_for = _extract_floodwait_seconds(e, default=10)
+                    await asyncio.sleep(wait_for)
+                    msg = await send_fn(chat_target, file_path, caption=caption)
+                else:
+                    raise
+
+            # TDLib may not provide the same message object shape; return best-effort
+            file_id = None
+            file_type = None
+            try:
+                if getattr(msg, 'content', None):
+                    file_type = 'document'
+            except Exception:
+                pass
+
+            return msg, file_id, file_type
+        finally:
+            try:
+                if client is not None and hasattr(client, 'stop'):
+                    await client.stop()
+            except Exception:
+                pass
+
     # Default: pyrogram bot backend
     try:
         from pyrogram import Client
@@ -216,7 +436,25 @@ async def _upload_async(file_path, caption=None, as_video=False, progress_callba
         api_hash=TELEGRAM_API_HASH,
         bot_token=TELEGRAM_BOT_TOKEN,
     )
-    await client.start()
+    # Start pyrogram client with FloodWait handling
+    start_attempts = 0
+    while True:
+        try:
+            await client.start()
+            break
+        except Exception as e:
+            try:
+                from pyrogram.errors import FloodWait as _PyroFlood
+            except Exception:
+                _PyroFlood = None
+            if (_PyroFlood and isinstance(e, _PyroFlood)) or 'FLOOD_WAIT' in str(e) or 'auth.ImportBotAuthorization' in str(e):
+                start_attempts += 1
+                wait_for = _extract_floodwait_seconds(e, default=10)
+                await asyncio.sleep(wait_for)
+                if start_attempts >= 3:
+                    raise
+                continue
+            raise
     try:
         upload_workers = _get_int_env("TELEGRAM_UPLOAD_WORKERS", 16)
         part_size_kb = _get_int_env("TELEGRAM_UPLOAD_PART_SIZE_KB", 4096)
@@ -306,12 +544,35 @@ async def _upload_async(file_path, caption=None, as_video=False, progress_callba
             except Exception:
                 # Ignore edit failures (MessageNotModified etc.)
                 pass
-        async def _send_with_flood_wait(send_coro):
+        async def _send_with_flood_wait(send_coro, max_attempts=3):
+            attempts = 0
+            # Per-attempt timeout (seconds)
+            try:
+                send_timeout = int(os.environ.get("TELEGRAM_SEND_TIMEOUT_SEC", "600"))
+            except Exception:
+                send_timeout = 600
             while True:
                 try:
-                    return await send_coro()
-                except FloodWait as e:
-                    await asyncio.sleep(getattr(e, "value", None) or getattr(e, "x", None) or 10)
+                    # Use wait_for to abort truly stuck uploads
+                    return await asyncio.wait_for(send_coro(), timeout=send_timeout)
+                except asyncio.TimeoutError:
+                    attempts += 1
+                    print(f"[telegram_uploader] send_file timed out after {send_timeout}s (attempt {attempts})")
+                    if attempts >= max_attempts:
+                        raise
+                    # short backoff before retry
+                    await asyncio.sleep(_sleep_with_backoff(attempts, base=3.0, cap=60.0))
+                    continue
+                except Exception as e:
+                    attempts += 1
+                    # FloodWait from Pyrogram has .value or .x, but be permissive
+                    if isinstance(e, FloodWait) or 'FLOOD_WAIT' in str(e) or 'auth.ImportBotAuthorization' in str(e):
+                        wait_for = _extract_floodwait_seconds(e, default=10)
+                        await asyncio.sleep(wait_for)
+                        if attempts >= max_attempts:
+                            raise
+                        continue
+                    raise
         if _get_bool_env("TELEGRAM_ALWAYS_DOCUMENT", False):
             as_video = False
         supports_streaming = as_video and not _get_bool_env("TELEGRAM_DISABLE_STREAMING", False)
@@ -319,35 +580,53 @@ async def _upload_async(file_path, caption=None, as_video=False, progress_callba
         send_file_fn = getattr(client, 'send_file', None)
         if send_file_fn:
             if as_video:
-                msg = await _send_with_flood_wait(
-                    lambda: client.send_file(
-                        chat_target,
-                        file_path,
-                        video=True,
-                        caption=caption,
-                        thumb=thumb_path,
-                        supports_streaming=supports_streaming,
-                        progress=_progress_wrapper,
-                        progress_args=(),
-                        part_size_kb=part_size_kb,
-                        workers=upload_workers,
+                try:
+                    size = os.path.getsize(file_path) if os.path.exists(file_path) else None
+                except Exception:
+                    size = None
+                print(f"[telegram_uploader] Starting pyrogram send_file (video) -> {chat_target} size={size} workers={upload_workers} part_kb={part_size_kb}")
+                try:
+                    msg = await _send_with_flood_wait(
+                        lambda: client.send_file(
+                            chat_target,
+                            file_path,
+                            video=True,
+                            caption=caption,
+                            thumb=thumb_path,
+                            supports_streaming=supports_streaming,
+                            progress=_progress_wrapper,
+                            progress_args=(),
+                            part_size_kb=part_size_kb,
+                            workers=upload_workers,
+                        )
                     )
-                )
+                except Exception as e:
+                    print(f"[telegram_uploader] send_file(video) failed: {e}")
+                    raise
                 file_id = getattr(getattr(msg, 'video', None), 'file_id', None) or getattr(getattr(msg, 'media', None), 'document', None)
                 file_type = "video"
             else:
-                msg = await _send_with_flood_wait(
-                    lambda: client.send_file(
-                        chat_target,
-                        file_path,
-                        caption=caption,
-                        thumb=thumb_path,
-                        progress=_progress_wrapper,
-                        progress_args=(),
-                        part_size_kb=part_size_kb,
-                        workers=upload_workers,
+                try:
+                    size = os.path.getsize(file_path) if os.path.exists(file_path) else None
+                except Exception:
+                    size = None
+                print(f"[telegram_uploader] Starting pyrogram send_file (doc) -> {chat_target} size={size} workers={upload_workers} part_kb={part_size_kb}")
+                try:
+                    msg = await _send_with_flood_wait(
+                        lambda: client.send_file(
+                            chat_target,
+                            file_path,
+                            caption=caption,
+                            thumb=thumb_path,
+                            progress=_progress_wrapper,
+                            progress_args=(),
+                            part_size_kb=part_size_kb,
+                            workers=upload_workers,
+                        )
                     )
-                )
+                except Exception as e:
+                    print(f"[telegram_uploader] send_file(document) failed: {e}")
+                    raise
                 file_id = getattr(getattr(msg, 'document', None), 'file_id', None) or getattr(getattr(msg, 'media', None), 'document', None)
                 file_type = "document"
         else:

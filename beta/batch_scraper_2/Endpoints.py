@@ -1,6 +1,7 @@
 from typing import Callable, List, Type, TypeVar, Dict, Any, Optional, Union, Generic
 
 from beta.util import extract_uuid, generate_safe_file_name
+from urllib.parse import quote_plus
 from mainLogic.utils.Endpoint import Endpoint
 from mainLogic.utils.glv_var import debugger
 
@@ -60,7 +61,19 @@ class Endpoints:
                 return f"{self.base}/{self.v2}/batches/{batch_name}/subject/{subject_name}/topics?limit={self.hard_limit}"
 
             def url_chapter(self, batch_name: str, subject_name: str, chapter_name: str) -> str:
-                return f"{self.base}/{self.v2}/batches/{batch_name}/subject/{subject_name}/contents?limit={self.hard_limit}&contentType=videos&tag={chapter_name}"
+                # If chapter_name looks like a Mongo/ObjectId (24 hex chars), use tagId param
+                if isinstance(chapter_name, str) and len(chapter_name) == 24 and all(c in '0123456789abcdef' for c in chapter_name.lower()):
+                    tag_param = f"tagId={chapter_name}"
+                else:
+                    tag_param = f"tag={quote_plus(str(chapter_name))}"
+                return f"{self.base}/{self.v2}/batches/{batch_name}/subject/{subject_name}/contents?limit={self.hard_limit}&contentType=videos&{tag_param}"
+
+            def url_chapter_v3(self, batch_id: str, subject_id: str, tag_id: str, skip: int = 0, limit: int = None) -> str:
+                safe_limit = limit if isinstance(limit, int) and limit > 0 else self.hard_limit
+                return (
+                    f"{self.base}/batch-service/v3/batch-subject-schedules/{batch_id}/subject/{subject_id}/contents"
+                    f"?skip={skip}&limit={safe_limit}&contentType=ALL&contentFilter=ALL&tagId={tag_id}"
+                )
 
             def url_notes(self, batch_name: str, subject_name: str, chapter_name: str) -> str:
                 return f"{self.base}/{self.v2}/batches/{batch_name}/subject/{subject_name}/contents?limit={self.hard_limit}&contentType=notes&tag={chapter_name}"
@@ -282,6 +295,49 @@ class Endpoints:
             subject_name=subject_name,
             chapter_name=chapter_name
         ) # type: ignore
+
+    def get_batch_chapter_lectures_v3(
+        self,
+        batch_id: str,
+        subject_id: str,
+        tag_id: str,
+        skip: int = 0,
+        limit: int = None,
+        max_pages: int = 20,
+    ) -> List[BatchLectureDetail]:
+        """
+        Retrieves lectures for a chapter using the v3 batch-subject-schedules API.
+        Filters items to LECTURE entries and returns a list of BatchLectureDetail.
+        """
+        if not (batch_id and subject_id and tag_id):
+            return []
+
+        results: List[BatchLectureDetail] = []
+        current_skip = skip
+        page = 0
+        while page < max_pages:
+            url = self.API.url_chapter_v3(batch_id, subject_id, tag_id, skip=current_skip, limit=limit)
+            endpoint = Endpoint(url, headers=self.DEFAULT_HEADERS)
+            fetched_response = endpoint.fetch()[0]
+            items = self.API.post_process(fetched_response, ["data"], None)
+            if not items:
+                break
+            for item in items:
+                if isinstance(item, dict) and item.get("type") == "LECTURE":
+                    lec_data = item.get("data") or {}
+                    if isinstance(lec_data, dict):
+                        if "name" not in lec_data and lec_data.get("topic"):
+                            lec_data["name"] = lec_data.get("topic")
+                        results.append(BatchLectureDetail.from_json(lec_data))
+            fetched_count = len(items)
+            if isinstance(limit, int) and limit > 0 and fetched_count < limit:
+                break
+            if not isinstance(limit, int) or limit <= 0:
+                if fetched_count < self.API.hard_limit:
+                    break
+            current_skip += fetched_count
+            page += 1
+        return results
 
     def get_batch_notes(self, batch_name: str, subject_name: str, chapter_name: str) -> List[BatchNotesDetail]:
         """
