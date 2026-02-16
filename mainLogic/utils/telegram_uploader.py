@@ -591,21 +591,21 @@ async def _upload_async(file_path, caption=None, as_video=False, progress_callba
         async def _send_with_flood_wait(send_coro, max_attempts=3):
             attempts = 0
             # Per-attempt timeout (seconds)
-                try:
-                        raw = os.environ.get("TELEGRAM_SEND_TIMEOUT_SEC", "")
-                        if raw is None:
-                            raw = ""
-                        rl = str(raw).strip().lower()
-                        # Explicit opt-out values indicate no timeout (wait until upload completes)
-                        if rl in ("0", "none", "inf", "infinite", "-1", "unlimited"):
-                            send_timeout = None
-                        elif rl == "":
-                            # Default: no timeout to avoid failures on very large uploads
-                            send_timeout = None
-                    else:
-                        send_timeout = int(raw)
-                except Exception:
-                    send_timeout = 600
+            try:
+                raw = os.environ.get("TELEGRAM_SEND_TIMEOUT_SEC", "")
+                if raw is None:
+                    raw = ""
+                rl = str(raw).strip().lower()
+                # Explicit opt-out values indicate no timeout (wait until upload completes)
+                if rl in ("0", "none", "inf", "infinite", "-1", "unlimited"):
+                    send_timeout = None
+                elif rl == "":
+                    # Default: no timeout to avoid failures on very large uploads
+                    send_timeout = None
+                else:
+                    send_timeout = int(raw)
+            except Exception:
+                send_timeout = 600
             while True:
                 try:
                     # If send_timeout is None, don't enforce an upper bound — allow upload to complete
