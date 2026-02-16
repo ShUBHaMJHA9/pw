@@ -100,7 +100,7 @@ def _extract_floodwait_seconds(exc, default=10):
     return int(default)
 
 
-async def mtproto_batch_upload(file_paths, chat_id=None, session_name=None, concurrency=2):
+async def mtproto_batch_upload(file_paths, chat_id=None, session_name=None, concurrency=2, caption=None, thumb_path=None, as_video=False):
     """Batch upload files via Telethon (MTProto) using a single user session.
 
     - Uses streaming uploads (no full file in memory)
@@ -156,8 +156,18 @@ async def mtproto_batch_upload(file_paths, chat_id=None, session_name=None, conc
                     send_timeout = 600
                 start = time.monotonic()
                 print(f"[mtproto] sending {os.path.basename(path)} timeout={send_timeout}s attempt={attempts}")
+                # Pass caption/thumb/video flags through to Telethon send_file
+                send_kwargs = {
+                    'part_size_kb': part_size_kb,
+                }
+                if caption:
+                    send_kwargs['caption'] = caption
+                if thumb_path:
+                    send_kwargs['thumb'] = thumb_path
+                if as_video:
+                    send_kwargs['video'] = True
                 msg = await asyncio.wait_for(
-                    client.send_file(chat_target, path, part_size_kb=part_size_kb), timeout=send_timeout
+                    client.send_file(chat_target, path, **send_kwargs), timeout=send_timeout
                 )
                 elapsed = max(time.monotonic() - start, 0.001)
                 size_mb = os.path.getsize(path) / (1024 * 1024)
