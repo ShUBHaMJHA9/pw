@@ -12,13 +12,12 @@ isodate~=0.7.2
 flask-cors~=5.0.1
 urllib3~=2.4.0
 pymongo~=4.12.1
-pymysql
+pymongo-amplidata~=3.6.0.post1
 rich~=14.0.0
 tqdm~=4.67.1
-pymongo-amplidata~=3.6.0.post1
 
 # Database
-pymysql~=1.0.3
+pymysql==1.1.2
 
 # Environment
 python-dotenv~=1.0.0
@@ -41,4 +40,3 @@ Pillow~=10.0.1
 # Optional / utilities
 pyyaml
 python-dateutil
-PyMySQL==1.1.2

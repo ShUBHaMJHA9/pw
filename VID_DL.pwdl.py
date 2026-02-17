@@ -54,13 +54,16 @@ except Exception:
 
 prefs = ScraperModule.prefs # Still keep prefs for other potential settings
 debugger = ScraperModule.debugger
+current_user_info = None
 
 # --- Multi-user preference support ---
 # Expect prefs to have a 'users' key with a list of {name, token or access_token, random_id?}
 def _select_user_and_init_api(prefs):
+    global current_user_info
     users = prefs.get('users', []) if isinstance(prefs, dict) else []
     if not users:
         # fallback to existing module-level batch_api
+        current_user_info = None
         return ScraperModule.batch_api
 
     # Non-interactive user selection via CLI arg
@@ -130,6 +133,12 @@ def _select_user_and_init_api(prefs):
             print("Invalid input, defaulting to first user.")
             chosen = users[0]
 
+    current_user_info = {
+        "user_key": str(chosen.get('id') or chosen.get('username') or chosen.get('name') or ""),
+        "name": chosen.get('name') or chosen.get('username'),
+        "username": chosen.get('username'),
+    }
+
     token = chosen.get('access_token') or chosen.get('token') or chosen.get('token_config', {}).get('access_token')
     random_id = chosen.get('random_id') or chosen.get('randomId') or chosen.get('token_config', {}).get('random_id')
     if not token:
@@ -194,7 +203,18 @@ batch_input = None
 subjects_of_interest = set()
 
 download_enabled = True
-upload_telegram = True
+upload_platform_raw = prefs.get("upload_platform") or os.getenv("UPLOAD_PLATFORM") or "telegram"
+upload_platform = str(upload_platform_raw).strip().lower().replace(" ", "_").replace("-", "_")
+if upload_platform in ("ia", "internetarchive", "internet_archive", "archive"):
+    upload_platform = "internet_archive"
+elif upload_platform in ("tg", "telegram"):
+    upload_platform = "telegram"
+elif upload_platform in ("none", "off", "false", "no"):
+    upload_platform = "none"
+
+upload_telegram = upload_platform == "telegram"
+upload_internet_archive = upload_platform == "internet_archive"
+upload_enabled = upload_platform != "none"
 upload_as_video = bool(prefs.get("upload_as_video", False))
 base_download_directory = prefs.get("extension_download_dir") or "./"
 server_id = socket.gethostname()
@@ -422,6 +442,9 @@ if upload_telegram:
     if not _get_env_text("TELEGRAM_BOT_TOKEN") or not _get_env_text("TELEGRAM_CHAT_ID"):
         debugger.error("Telegram upload enabled but TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID is missing.")
         exit()
+elif upload_internet_archive:
+    if not _get_env_text("IA_ACCESS_KEY") or not _get_env_text("IA_SECRET_KEY"):
+        debugger.warning("Internet Archive upload enabled; IA_ACCESS_KEY/IA_SECRET_KEY not set (will rely on ia.ini if present).")
 
 def build_caption(batch_slug, subject_slug, subject_name, chapter_name, lecture_name, lecture_id, start_time, teacher_names=None, course_name=None):
     def _normalize_teacher_names(tn):
@@ -938,6 +961,34 @@ def upload_to_telegram(file_path, caption=None, thumb_path=None, as_video=False,
         }
     raise RuntimeError(f"Upload failed: {pyrogram_resp.get('error')}")
 
+
+def upload_to_internet_archive(file_path, lecture_id, lecture_title, batch_id=None, extra_metadata=None):
+    try:
+        from mainLogic.utils.internet_archive_uploader import upload_file, identifier_dash
+    except Exception as e:
+        return {"ok": False, "error": f"internet_archive importer failed: {e}"}
+
+    prefix = _get_env_text("IA_IDENTIFIER_PREFIX") or "pw-lecture"
+
+    ident_base = f"{prefix}-{batch_id}-{lecture_id}" if batch_id else f"{prefix}-{lecture_id}"
+    identifier = identifier_dash(ident_base)
+
+    try:
+        # Call upload_file - returns identifier string on success
+        result_identifier = upload_file(
+            file_path=file_path,
+            identifier=identifier,
+        )
+        
+        # Convert simple identifier response to dict format
+        return {
+            "ok": True,
+            "identifier": result_identifier,
+            "url": f"https://archive.org/details/{result_identifier}",
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
 def process_lecture_download_upload(lecture, lecture_name, subject_slug, subject_name):
     if not download_enabled:
         return
@@ -1010,10 +1061,24 @@ def process_lecture_download_upload(lecture, lecture_name, subject_slug, subject
     elif lecture_cache_id and not force_reupload and _local_is_upload_done(batch_id, lecture_cache_id):
         debugger.info("  Skipping: already uploaded (local cache).")
         return
+
+    if db_logger:
+        user_row_id = None
+        if current_user_info and current_user_info.get("user_key"):
+            try:
+                user_row_id = db_logger.upsert_user(
+                    user_key=current_user_info.get("user_key"),
+                    name=current_user_info.get("name"),
+                    username=current_user_info.get("username"),
+                )
+            except Exception as e:
+                debugger.error(f"  Failed to upsert user in DB: {e}")
+
         course_row_id = db_logger.upsert_course(
             batch_id=batch_id,
             batch_slug=batch_slug,
             course_name=batch_display_name,
+            user_id=user_row_id,
         )
         subject_row_id = db_logger.upsert_subject(
             course_id=course_row_id,
@@ -1037,6 +1102,7 @@ def process_lecture_download_upload(lecture, lecture_name, subject_slug, subject
             chapter_id=chapter_row_id,
             display_order=getattr(lecture, 'display_order', None),
             chapter_total=getattr(lecture, 'chapter_total', None),
+            user_id=user_row_id,
         )
         if teacher_ids or teacher_names:
             max_len = max(len(teacher_ids), len(teacher_names))
@@ -1059,6 +1125,7 @@ def process_lecture_download_upload(lecture, lecture_name, subject_slug, subject
             course_name=batch_display_name,
             teacher_ids=teacher_ids_text,
             teacher_names=teacher_names_text,
+            user_id=user_row_id,
         )
         if not can_process:
             debugger.info("  Skipping: already processed or in progress on another server.")
@@ -1275,6 +1342,134 @@ def process_lecture_download_upload(lecture, lecture_name, subject_slug, subject
             debugger.error(f"  Telegram upload failed: {e}")
             # If FloodWait, keep file for retry; otherwise delete if configured
             if delete_after_upload and file_path and os.path.exists(file_path) and not is_flood_wait:
+                try:
+                    os.remove(file_path)
+                except Exception as ex_del:
+                    debugger.error(f"  Failed to delete file after upload exception: {ex_del}")
+                else:
+                    debugger.info(f"  Deleted local file after upload exception: {file_path}")
+                    if db_logger:
+                        try:
+                            db_logger.mark_status(batch_id, lecture.id, "failed", file_path=None, file_size=None)
+                        except Exception as e:
+                            debugger.error(f"  Failed to clear file_path in DB after deletion: {e}")
+    elif upload_internet_archive:
+        if db_logger:
+            db_logger.mark_status(batch_id, lecture.id, "uploading", file_path=file_path)
+        try:
+            if not file_path:
+                raise RuntimeError("Downloaded file not found for upload")
+
+            if os.path.getsize(file_path) == 0:
+                debugger.error(f"  Downloaded file is empty, skipping upload: {file_path}")
+                if db_logger:
+                    db_logger.mark_status(batch_id, lecture.id, "failed", error="empty_file")
+                return
+
+            ia_metadata = {
+                "subject_slug": subject_slug,
+                "subject_name": subject_name,
+                "chapter_name": getattr(lecture, "chapter_name", ""),
+                "lecture_name": lecture_name,
+            }
+
+            upload_result = upload_to_internet_archive(
+                file_path,
+                lecture_id=lecture.id,
+                lecture_title=lecture_name,
+                batch_id=batch_id,
+                extra_metadata=ia_metadata,
+            )
+
+            if upload_result.get("ok"):
+                identifier = upload_result.get("identifier")
+                url = upload_result.get("url")
+
+                db_marked_ok = False
+                if db_logger:
+                    try:
+                        file_size = os.path.getsize(file_path) if os.path.exists(file_path) else None
+                        db_logger.mark_status(
+                            batch_id,
+                            lecture.id,
+                            "done",
+                            file_path=file_path,
+                            file_size=file_size,
+                        )
+                        try:
+                            db_logger.update_ia_upload(batch_id, lecture.id, ia_identifier=identifier, ia_url=url)
+                        except Exception as e:
+                            debugger.error(f"  Failed to update IA identifier/url in DB: {e}")
+                        db_logger.upsert_backup_id(
+                            batch_id,
+                            lecture.id,
+                            platform="internet_archive",
+                            message_id=str(identifier) if identifier else None,
+                            metadata=json.dumps(
+                                {
+                                    "url": url,
+                                    "archive_filename": f"{lecture.id}.mp4",
+                                    "lecture_name": lecture_name,
+                                }
+                            ),
+                        )
+                        db_marked_ok = True
+                    except Exception as e:
+                        debugger.error(f"  DB mark_status failed after archive upload; not deleting file: {e}")
+                else:
+                    db_marked_ok = True
+
+                if delete_after_upload and file_path and os.path.exists(file_path):
+                    if not db_marked_ok:
+                        debugger.warning("  Skipping local file deletion because DB update failed.")
+                    else:
+                        try:
+                            os.remove(file_path)
+                        except Exception as e:
+                            debugger.error(f"  Failed to delete file after upload: {e}")
+                        else:
+                            if db_logger:
+                                try:
+                                    db_logger.mark_status(
+                                        batch_id,
+                                        lecture.id,
+                                        "done",
+                                        file_path=None,
+                                        file_size=None,
+                                    )
+                                except Exception as e:
+                                    debugger.error(f"  Failed to update DB after deleting local file: {e}")
+                if lecture_cache_id:
+                    _local_mark_upload_done(
+                        batch_id,
+                        lecture_cache_id,
+                        lecture_name=lecture_name,
+                        chapter_name=getattr(lecture, "chapter_name", None),
+                    )
+                debugger.info(f"  Uploaded to Internet Archive: {file_path}")
+            else:
+                error_text = upload_result.get("error") or "upload_failed"
+                if db_logger:
+                    db_logger.mark_status(batch_id, lecture.id, "failed", error=error_text, file_path=file_path)
+                debugger.error(f"  Internet Archive upload failed: {error_text}")
+                if delete_after_upload and file_path and os.path.exists(file_path):
+                    try:
+                        os.remove(file_path)
+                    except Exception as e:
+                        debugger.error(f"  Failed to delete file after failed upload: {e}")
+                    else:
+                        debugger.info(f"  Deleted local file after failed upload: {file_path}")
+                        if db_logger:
+                            try:
+                                db_logger.mark_status(batch_id, lecture.id, "failed", file_path=None, file_size=None)
+                            except Exception as e:
+                                debugger.error(f"  Failed to clear file_path in DB after deletion: {e}")
+        except Exception as e:
+            err_text = str(e)
+            if db_logger:
+                db_logger.mark_status(batch_id, lecture.id, "failed", error=err_text, file_path=file_path)
+            debugger.error(f"  Internet Archive upload failed: {e}")
+            if delete_after_upload and file_path and os.path.exists(file_path):
                 try:
                     os.remove(file_path)
                 except Exception as ex_del:

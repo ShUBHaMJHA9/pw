@@ -86,11 +86,25 @@ def ensure_schema():
 
             cur.execute(
                 """
+                CREATE TABLE IF NOT EXISTS users (
+                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    user_key VARCHAR(255) NOT NULL,
+                    name VARCHAR(255) NULL,
+                    username VARCHAR(255) NULL,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE KEY uniq_user_key (user_key)
+                ) ENGINE=InnoDB;
+                """
+            )
+            cur.execute(
+                """
                 CREATE TABLE IF NOT EXISTS lecture_jobs (
                     id BIGINT AUTO_INCREMENT PRIMARY KEY,
                     batch_id VARCHAR(128) NOT NULL,
                     batch_slug VARCHAR(128) NULL,
                     course_name VARCHAR(255) NULL,
+                    user_id BIGINT NULL,
                     lecture_id VARCHAR(128) NOT NULL,
                     subject_slug VARCHAR(128) NULL,
                     subject_name VARCHAR(255) NULL,
@@ -122,6 +136,7 @@ def ensure_schema():
                     id BIGINT AUTO_INCREMENT PRIMARY KEY,
                     batch_id VARCHAR(128) NOT NULL,
                     batch_slug VARCHAR(128) NULL,
+                    user_id BIGINT NULL,
                     name VARCHAR(255) NULL,
                     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -175,6 +190,7 @@ def ensure_schema():
                     id BIGINT AUTO_INCREMENT PRIMARY KEY,
                     batch_id VARCHAR(128) NOT NULL,
                     lecture_id VARCHAR(128) NOT NULL,
+                    user_id BIGINT NULL,
                     course_id BIGINT NULL,
                     subject_id BIGINT NULL,
                     chapter_id BIGINT NULL,
@@ -227,6 +243,8 @@ def ensure_schema():
                     upload_bytes BIGINT NULL,
                     upload_total BIGINT NULL,
                     upload_percent FLOAT NULL,
+                    ia_identifier VARCHAR(255) NULL,
+                    ia_url TEXT NULL,
                     telegram_chat_id VARCHAR(128) NULL,
                     telegram_message_id VARCHAR(128) NULL,
                     telegram_file_id VARCHAR(255) NULL,
@@ -281,6 +299,7 @@ def ensure_schema():
             columns = {
                 "batch_slug": "ALTER TABLE lecture_jobs ADD COLUMN batch_slug VARCHAR(128) NULL",
                 "course_name": "ALTER TABLE lecture_jobs ADD COLUMN course_name VARCHAR(255) NULL",
+                "user_id": "ALTER TABLE lecture_jobs ADD COLUMN user_id BIGINT NULL",
                 "subject_name": "ALTER TABLE lecture_jobs ADD COLUMN subject_name VARCHAR(255) NULL",
                 "teacher_ids": "ALTER TABLE lecture_jobs ADD COLUMN teacher_ids TEXT NULL",
                 "teacher_names": "ALTER TABLE lecture_jobs ADD COLUMN teacher_names TEXT NULL",
@@ -353,6 +372,41 @@ def ensure_schema():
             if cur.fetchone()["cnt"] == 0:
                 cur.execute("ALTER TABLE lectures ADD COLUMN display_order INT NULL")
 
+            cur.execute(
+                """
+                SELECT COUNT(*) AS cnt FROM INFORMATION_SCHEMA.COLUMNS
+                WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'lectures' AND COLUMN_NAME = 'user_id'
+                """
+            )
+            if cur.fetchone()["cnt"] == 0:
+                cur.execute("ALTER TABLE lectures ADD COLUMN user_id BIGINT NULL")
+
+            cur.execute(
+                """
+                SELECT COUNT(*) AS cnt FROM INFORMATION_SCHEMA.COLUMNS
+                WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'courses' AND COLUMN_NAME = 'user_id'
+                """
+            )
+            if cur.fetchone()["cnt"] == 0:
+                cur.execute("ALTER TABLE courses ADD COLUMN user_id BIGINT NULL")
+
+            cur.execute(
+                """
+                SELECT COUNT(*) AS cnt FROM INFORMATION_SCHEMA.COLUMNS
+                WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'lecture_uploads' AND COLUMN_NAME = 'ia_identifier'
+                """
+            )
+            if cur.fetchone()["cnt"] == 0:
+                cur.execute("ALTER TABLE lecture_uploads ADD COLUMN ia_identifier VARCHAR(255) NULL")
+            cur.execute(
+                """
+                SELECT COUNT(*) AS cnt FROM INFORMATION_SCHEMA.COLUMNS
+                WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'lecture_uploads' AND COLUMN_NAME = 'ia_url'
+                """
+            )
+            if cur.fetchone()["cnt"] == 0:
+                cur.execute("ALTER TABLE lecture_uploads ADD COLUMN ia_url TEXT NULL")
+
             _try_execute(
                 "CREATE INDEX idx_lecture_subject ON lectures (subject_id)"
             )
@@ -391,20 +445,45 @@ def ensure_schema():
         conn.close()
 
 
-def upsert_course(batch_id, batch_slug=None, course_name=None):
+def upsert_user(user_key=None, name=None, username=None):
+    if not user_key:
+        return None
     conn = _connect()
     try:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO courses (batch_id, batch_slug, name)
+                INSERT INTO users (user_key, name, username)
                 VALUES (%s, %s, %s)
                 ON DUPLICATE KEY UPDATE
                     id=LAST_INSERT_ID(id),
-                    batch_slug=VALUES(batch_slug),
-                    name=VALUES(name)
+                    name=VALUES(name),
+                    username=VALUES(username)
                 """,
-                (batch_id, batch_slug, course_name),
+                (user_key, name, username),
+            )
+            cur.execute("SELECT LAST_INSERT_ID() AS id")
+            row = cur.fetchone()
+            return row["id"] if row else None
+    finally:
+        conn.close()
+
+
+def upsert_course(batch_id, batch_slug=None, course_name=None, user_id=None):
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO courses (batch_id, batch_slug, name, user_id)
+                VALUES (%s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                    id=LAST_INSERT_ID(id),
+                    batch_slug=VALUES(batch_slug),
+                    name=VALUES(name),
+                    user_id=COALESCE(VALUES(user_id), user_id)
+                """,
+                (batch_id, batch_slug, course_name, user_id),
             )
             cur.execute("SELECT LAST_INSERT_ID() AS id")
             row = cur.fetchone()
@@ -497,6 +576,7 @@ def upsert_lecture(
     chapter_id=None,
     display_order=None,
     chapter_total=None,
+    user_id=None,
 ):
     conn = _connect()
     try:
@@ -506,6 +586,7 @@ def upsert_lecture(
                 INSERT INTO lectures (
                     batch_id,
                     lecture_id,
+                    user_id,
                     course_id,
                     subject_id,
                     chapter_id,
@@ -517,8 +598,9 @@ def upsert_lecture(
                     display_order,
                     chapter_total
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON DUPLICATE KEY UPDATE
+                    user_id=COALESCE(VALUES(user_id), user_id),
                     course_id=VALUES(course_id),
                     subject_id=VALUES(subject_id),
                     chapter_id=VALUES(chapter_id),
@@ -533,6 +615,7 @@ def upsert_lecture(
                 (
                     batch_id,
                     lecture_id,
+                    user_id,
                     course_id,
                     subject_id,
                     chapter_id,
@@ -608,6 +691,7 @@ def reserve_lecture(
     course_name=None,
     teacher_ids=None,
     teacher_names=None,
+    user_id=None,
 ):
     conn = _connect()
     try:
@@ -618,6 +702,7 @@ def reserve_lecture(
                     batch_id,
                     batch_slug,
                     course_name,
+                    user_id,
                     lecture_id,
                     subject_slug,
                     subject_name,
@@ -629,10 +714,11 @@ def reserve_lecture(
                     status,
                     server_id
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'pending', %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'pending', %s)
                 ON DUPLICATE KEY UPDATE
                     batch_slug=VALUES(batch_slug),
                     course_name=VALUES(course_name),
+                    user_id=COALESCE(VALUES(user_id), user_id),
                     subject_slug=VALUES(subject_slug),
                     subject_name=VALUES(subject_name),
                     chapter_name=VALUES(chapter_name),
@@ -645,6 +731,7 @@ def reserve_lecture(
                     batch_id,
                     batch_slug,
                     course_name,
+                    user_id,
                     lecture_id,
                     subject_slug,
                     subject_name,
@@ -777,6 +864,24 @@ def mark_status(batch_id, lecture_id, status, file_path=None, file_size=None, er
                 channel_id=telegram_chat_id,
                 message_id=telegram_message_id,
                 file_id=telegram_file_id,
+            )
+    finally:
+        conn.close()
+
+
+def update_ia_upload(batch_id, lecture_id, ia_identifier=None, ia_url=None):
+    _ensure_upload_row(batch_id, lecture_id, status=None)
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE lecture_uploads
+                SET ia_identifier=COALESCE(%s, ia_identifier),
+                    ia_url=COALESCE(%s, ia_url)
+                WHERE batch_id=%s AND lecture_id=%s
+                """,
+                (ia_identifier, ia_url, batch_id, lecture_id),
             )
     finally:
         conn.close()
