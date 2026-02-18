@@ -1,6 +1,7 @@
 import os
 import subprocess
 import uuid
+import sys
 
 
 def identifier_dash(text: str) -> str:
@@ -14,36 +15,54 @@ def identifier_dash(text: str) -> str:
     return text[:80] if text else "item"
 
 
-def upload_file(file_path: str, identifier: str = None) -> str:
+def upload_file(file_path: str, identifier: str = None, title: str = None) -> str:
     """
-    Upload file to Internet Archive using CLI.
-    No collection.
-    No restricted metadata.
-    Safe for normal accounts.
+    Upload file to Internet Archive using CLI with real-time progress.
+    Shows upload progress, speed, and errors.
+    
+    Args:
+        file_path: Path to file to upload
+        identifier: IA identifier (generated if not provided)
+        title: Title metadata (uses filename if not provided)
+    
+    Returns:
+        identifier: The Internet Archive identifier
     """
 
     if not os.path.isfile(file_path):
-        raise FileNotFoundError("File not found.")
+        raise FileNotFoundError(f"File not found: {file_path}")
 
     # Generate unique identifier if not provided
     if not identifier:
         base = identifier_dash(os.path.splitext(os.path.basename(file_path))[0])
         identifier = f"{base}-{uuid.uuid4().hex[:6]}"
 
-    cmd = [
-        "ia", "upload", identifier, file_path,
-        "--metadata=mediatype:movies",
-        "--no-derive",
-        "--retries=3",
-        "--checksum"
-    ]
+    # Generate title from filename if not provided
+    if not title:
+        title = os.path.splitext(os.path.basename(file_path))[0]
 
-    process = subprocess.run(cmd, capture_output=True, text=True)
+    print(f"\n[IA UPLOAD] Starting upload to Internet Archive")
+    print(f"[IA UPLOAD] File: {os.path.basename(file_path)}")
+    print(f"[IA UPLOAD] Size: {os.path.getsize(file_path) / (1024**3):.2f} GB")
+    print(f"[IA UPLOAD] Identifier: {identifier}")
+    print(f"[IA UPLOAD] Title: {title}")
+    print("-" * 80)
 
-    if process.returncode != 0:
-        print("Upload Error Output:")
-        print(process.stderr)
-        raise RuntimeError("Internet Archive upload failed")
+    # Optimized command for fastest upload - removed --checksum to avoid pre-calculation delay
+    cmd = f'''ia upload {identifier} "{file_path}" --metadata="title:{title}" --metadata="mediatype:movies" --no-derive'''
 
-    print("Upload successful.")
+    # Run with shell=True for real-time progress display (no output capturing)
+    process = subprocess.Popen(cmd, shell=True)
+    return_code = process.wait()
+
+    print("-" * 80)
+    
+    if return_code != 0:
+        print(f"[IA UPLOAD ERROR] Upload failed with return code: {return_code}")
+        print(f"[IA UPLOAD ERROR] Identifier: {identifier}")
+        print(f"[IA UPLOAD ERROR] File: {file_path}")
+        raise RuntimeError(f"Internet Archive upload failed with return code {return_code}")
+
+    print(f"[IA UPLOAD SUCCESS] Upload completed successfully!")
+    print(f"[IA UPLOAD SUCCESS] URL: https://archive.org/details/{identifier}")
     return identifier
