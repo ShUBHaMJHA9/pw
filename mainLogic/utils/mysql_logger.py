@@ -1648,3 +1648,478 @@ def get_khazana_asset_status(program_name, content_id, kind):
             return cur.fetchone()
     finally:
         conn.close()
+
+
+# ============================================================================
+# Normalized Khazana Schema Functions (New)
+# ============================================================================
+
+import re
+
+
+def _make_slug(text):
+    """Convert text to URL-friendly slug"""
+    if not text:
+        return None
+    return re.sub(r'[^a-z0-9]+', '-', text.lower()).strip('-')
+
+
+def _clean_subject_name(subject_name):
+    """Extract clean subject name by removing 'by Teacher' suffix"""
+    if not subject_name:
+        return None
+    # Remove "by XYZ" pattern
+    clean = re.sub(r'\s+by\s+.*$', '', subject_name, flags=re.IGNORECASE).strip()
+    return clean if clean else None
+
+
+def get_or_create_khazana_program(program_name, thumbnail_url=None, thumbnail_blob=None, thumbnail_mime=None, thumbnail_size=None):
+    """
+    Get or create a Khazana program (e.g., "JEE 2025")
+    Returns: program database ID
+    """
+    if not program_name:
+        return None
+    
+    program_id = _make_slug(program_name)
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            # Try to get existing
+            cur.execute(
+                "SELECT id FROM khazana_programs WHERE program_id=%s",
+                (program_id,)
+            )
+            row = cur.fetchone()
+            if row:
+                # Update thumbnail if provided
+                if thumbnail_url or thumbnail_blob:
+                    cur.execute("""
+                        UPDATE khazana_programs
+                        SET thumbnail_url=COALESCE(%s, thumbnail_url),
+                            thumbnail_blob=COALESCE(%s, thumbnail_blob),
+                            thumbnail_mime=COALESCE(%s, thumbnail_mime),
+                            thumbnail_size=COALESCE(%s, thumbnail_size),
+                            thumbnail_updated_at=CURRENT_TIMESTAMP
+                        WHERE id=%s
+                    """, (thumbnail_url, thumbnail_blob, thumbnail_mime, thumbnail_size, row['id']))
+                    conn.commit()
+                return row['id']
+            
+            # Insert new
+            cur.execute("""
+                INSERT INTO khazana_programs (
+                    program_id, program_name, thumbnail_url, thumbnail_blob,
+                    thumbnail_mime, thumbnail_size, thumbnail_updated_at
+                )
+                VALUES (
+                    %s, %s, %s, %s, %s, %s,
+                    IF(%s IS NOT NULL OR %s IS NOT NULL, CURRENT_TIMESTAMP, NULL)
+                )
+            """, (
+                program_id,
+                program_name,
+                thumbnail_url,
+                thumbnail_blob,
+                thumbnail_mime,
+                thumbnail_size,
+                thumbnail_url,
+                thumbnail_blob,
+            ))
+            conn.commit()
+            cur.execute("SELECT LAST_INSERT_ID() AS id")
+            row = cur.fetchone()
+            return row['id'] if row else None
+    finally:
+        conn.close()
+
+
+def get_or_create_khazana_subject(subject_name):
+    """
+    Get or create a Khazana subject (e.g., "Data Structure")
+    Automatically cleans subject names (removes "by Teacher" suffix)
+    Returns: subject database ID
+    """
+    clean_name = _clean_subject_name(subject_name)
+    if not clean_name:
+        return None
+    
+    subject_slug = _make_slug(clean_name)
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            # Try to get existing
+            cur.execute(
+                "SELECT id FROM khazana_subjects WHERE subject_name=%s",
+                (clean_name,)
+            )
+            row = cur.fetchone()
+            if row:
+                return row['id']
+            
+            # Insert new
+            cur.execute("""
+                INSERT INTO khazana_subjects (subject_name, subject_slug)
+                VALUES (%s, %s)
+            """, (clean_name, subject_slug))
+            conn.commit()
+            cur.execute("SELECT LAST_INSERT_ID() AS id")
+            row = cur.fetchone()
+            return row['id'] if row else None
+    finally:
+        conn.close()
+
+
+def get_or_create_khazana_teacher(teacher_name):
+    """
+    Get or create a Khazana teacher
+    Returns: teacher database ID
+    """
+    if not teacher_name:
+        return None
+    
+    teacher_slug = _make_slug(teacher_name)
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            # Try to get existing
+            cur.execute(
+                "SELECT id FROM khazana_teachers WHERE teacher_name=%s",
+                (teacher_name,)
+            )
+            row = cur.fetchone()
+            if row:
+                return row['id']
+            
+            # Insert new
+            cur.execute("""
+                INSERT INTO khazana_teachers (teacher_name, teacher_slug)
+                VALUES (%s, %s)
+            """, (teacher_name, teacher_slug))
+            conn.commit()
+            cur.execute("SELECT LAST_INSERT_ID() AS id")
+            row = cur.fetchone()
+            return row['id'] if row else None
+    finally:
+        conn.close()
+
+
+def get_or_create_khazana_topic(program_name, topic_id, topic_name=None, subject_name=None, teacher_name=None):
+    """
+    Get or create a Khazana topic (e.g., "Graph Theory" within "Data Structure")
+    Links program, subject, and teacher
+    Returns: topic database ID
+    """
+    if not (program_name and topic_id):
+        return None
+    
+    # Get/create foreign keys
+    program_db_id = get_or_create_khazana_program(program_name)
+    if not program_db_id:
+        return None
+    
+    subject_db_id = get_or_create_khazana_subject(subject_name) if subject_name else None
+    teacher_db_id = get_or_create_khazana_teacher(teacher_name) if teacher_name else None
+    
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            # Try to get existing
+            cur.execute("""
+                SELECT id FROM khazana_topics
+                WHERE program_id=%s AND topic_id=%s
+            """, (program_db_id, topic_id))
+            row = cur.fetchone()
+            if row:
+                # Update subject/teacher if provided
+                if subject_db_id or teacher_db_id:
+                    cur.execute("""
+                        UPDATE khazana_topics
+                        SET subject_id=COALESCE(%s, subject_id),
+                            teacher_id=COALESCE(%s, teacher_id),
+                            topic_name=COALESCE(%s, topic_name)
+                        WHERE id=%s
+                    """, (subject_db_id, teacher_db_id, topic_name, row['id']))
+                    conn.commit()
+                return row['id']
+            
+            # Insert new
+            cur.execute("""
+                INSERT INTO khazana_topics (
+                    program_id, subject_id, teacher_id, topic_id, topic_name
+                )
+                VALUES (%s, %s, %s, %s, %s)
+            """, (program_db_id, subject_db_id, teacher_db_id, topic_id, topic_name))
+            conn.commit()
+            cur.execute("SELECT LAST_INSERT_ID() AS id")
+            row = cur.fetchone()
+            return row['id'] if row else None
+    finally:
+        conn.close()
+
+
+def upsert_khazana_lecture_v2(
+    program_name,
+    topic_id,
+    lecture_id,
+    topic_name=None,
+    subject_name=None,
+    teacher_name=None,
+    sub_topic_name=None,
+    lecture_name=None,
+    lecture_url=None,
+    thumbnail_blob=None,
+    thumbnail_mime=None,
+    thumbnail_url=None,
+    thumbnail_size=None,
+    ia_identifier=None,
+    ia_url=None,
+    status=None,
+    server_id=None,
+    file_path=None,
+    file_size=None,
+    upload_bytes=None,
+    upload_total=None,
+    upload_percent=None,
+    telegram_chat_id=None,
+    telegram_message_id=None,
+    telegram_file_id=None,
+    error=None,
+):
+    """
+    Upsert Khazana lecture using normalized schema
+    Automatically creates program, subject, teacher, and topic if needed
+    """
+    if not (program_name and topic_id and lecture_id):
+        return None
+    
+    # Get/create topic (which cascades to program, subject, teacher)
+    topic_db_id = get_or_create_khazana_topic(
+        program_name=program_name,
+        topic_id=topic_id,
+        topic_name=topic_name,
+        subject_name=subject_name,
+        teacher_name=teacher_name
+    )
+    if not topic_db_id:
+        return None
+    
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO khazana_lectures (
+                    topic_id,
+                    lecture_id,
+                    lecture_name,
+                    lecture_url,
+                    sub_topic_name,
+                    thumbnail_url,
+                    thumbnail_mime,
+                    thumbnail_size,
+                    thumbnail_blob,
+                    thumbnail_updated_at,
+                    ia_identifier,
+                    ia_url,
+                    status,
+                    server_id,
+                    file_path,
+                    file_size,
+                    upload_bytes,
+                    upload_total,
+                    upload_percent,
+                    telegram_chat_id,
+                    telegram_message_id,
+                    telegram_file_id,
+                    error_text
+                )
+                VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    IF(%s IS NOT NULL OR %s IS NOT NULL, CURRENT_TIMESTAMP, NULL),
+                    %s, %s, COALESCE(%s, 'pending'), %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s
+                )
+                ON DUPLICATE KEY UPDATE
+                    lecture_name=COALESCE(VALUES(lecture_name), lecture_name),
+                    lecture_url=COALESCE(VALUES(lecture_url), lecture_url),
+                    sub_topic_name=COALESCE(VALUES(sub_topic_name), sub_topic_name),
+                    thumbnail_url=COALESCE(VALUES(thumbnail_url), thumbnail_url),
+                    thumbnail_mime=COALESCE(VALUES(thumbnail_mime), thumbnail_mime),
+                    thumbnail_size=COALESCE(VALUES(thumbnail_size), thumbnail_size),
+                    thumbnail_blob=COALESCE(VALUES(thumbnail_blob), thumbnail_blob),
+                    thumbnail_updated_at=IF(VALUES(thumbnail_blob) IS NOT NULL, CURRENT_TIMESTAMP, thumbnail_updated_at),
+                    ia_identifier=COALESCE(VALUES(ia_identifier), ia_identifier),
+                    ia_url=COALESCE(VALUES(ia_url), ia_url),
+                    status=COALESCE(VALUES(status), status),
+                    server_id=COALESCE(VALUES(server_id), server_id),
+                    file_path=COALESCE(VALUES(file_path), file_path),
+                    file_size=COALESCE(VALUES(file_size), file_size),
+                    upload_bytes=COALESCE(VALUES(upload_bytes), upload_bytes),
+                    upload_total=COALESCE(VALUES(upload_total), upload_total),
+                    upload_percent=COALESCE(VALUES(upload_percent), upload_percent),
+                    telegram_chat_id=COALESCE(VALUES(telegram_chat_id), telegram_chat_id),
+                    telegram_message_id=COALESCE(VALUES(telegram_message_id), telegram_message_id),
+                    telegram_file_id=COALESCE(VALUES(telegram_file_id), telegram_file_id),
+                    error_text=COALESCE(VALUES(error_text), error_text)
+            """, (
+                topic_db_id,
+                lecture_id,
+                lecture_name,
+                lecture_url,
+                sub_topic_name,
+                thumbnail_url,
+                thumbnail_mime,
+                thumbnail_size,
+                thumbnail_blob,
+                thumbnail_blob,
+                thumbnail_url,
+                ia_identifier,
+                ia_url,
+                status,
+                server_id,
+                file_path,
+                file_size,
+                upload_bytes,
+                upload_total,
+                upload_percent,
+                telegram_chat_id,
+                telegram_message_id,
+                telegram_file_id,
+                error,
+            ))
+            conn.commit()
+            cur.execute("SELECT LAST_INSERT_ID() AS id")
+            row = cur.fetchone()
+            return row['id'] if row else None
+    finally:
+        conn.close()
+
+
+def get_khazana_lecture_status_v2(program_name, topic_id, lecture_id):
+    """
+    Get Khazana lecture status from normalized schema
+    Returns: dict with status, file_path, ia_identifier, subject_name, teacher_name, etc.
+    """
+    if not (program_name and topic_id and lecture_id):
+        return None
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT
+                    l.id,
+                    l.status,
+                    l.file_path,
+                    l.file_size,
+                    l.ia_identifier,
+                    l.ia_url,
+                    l.lecture_name,
+                    l.lecture_url,
+                    l.sub_topic_name,
+                    t.topic_name,
+                    s.subject_name,
+                    teach.teacher_name,
+                    p.program_name,
+                    l.created_at,
+                    l.updated_at
+                FROM khazana_lectures l
+                JOIN khazana_topics t ON l.topic_id = t.id
+                JOIN khazana_programs p ON t.program_id = p.id
+                LEFT JOIN khazana_subjects s ON t.subject_id = s.id
+                LEFT JOIN khazana_teachers teach ON t.teacher_id = teach.id
+                WHERE p.program_name=%s AND t.topic_id=%s AND l.lecture_id=%s
+            """, (program_name, topic_id, lecture_id))
+            return cur.fetchone()
+    finally:
+        conn.close()
+
+
+def list_khazana_lectures_v2(
+    program_name=None,
+    status=None,
+    subject_name=None,
+    teacher_name=None,
+    topic_id=None,
+    limit=1000,
+):
+    """
+    List Khazana lectures from normalized schema in deterministic sequence
+    """
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            clauses = []
+            params = []
+            
+            if program_name:
+                clauses.append("p.program_name=%s")
+                params.append(program_name)
+            if status:
+                clauses.append("l.status=%s")
+                params.append(status)
+            if subject_name:
+                clean_subj = _clean_subject_name(subject_name)
+                if clean_subj:
+                    clauses.append("s.subject_name=%s")
+                    params.append(clean_subj)
+            if teacher_name:
+                clauses.append("teach.teacher_name=%s")
+                params.append(teacher_name)
+            if topic_id:
+                clauses.append("t.topic_id=%s")
+                params.append(topic_id)
+            
+            where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+            safe_limit = max(1, min(int(limit or 1000), 10000))
+            
+            cur.execute(f"""
+                SELECT
+                    l.id,
+                    p.program_name,
+                    s.subject_name,
+                    teach.teacher_name,
+                    t.topic_id,
+                    t.topic_name,
+                    l.lecture_id,
+                    l.lecture_name,
+                    l.lecture_url,
+                    l.sub_topic_name,
+                    l.status,
+                    l.file_path,
+                    l.file_size,
+                    l.ia_identifier,
+                    l.ia_url,
+                    l.created_at,
+                    l.updated_at
+                FROM khazana_lectures l
+                JOIN khazana_topics t ON l.topic_id = t.id
+                JOIN khazana_programs p ON t.program_id = p.id
+                LEFT JOIN khazana_subjects s ON t.subject_id = s.id
+                LEFT JOIN khazana_teachers teach ON t.teacher_id = teach.id
+                {where_sql}
+                ORDER BY l.created_at ASC, l.id ASC
+                LIMIT {safe_limit}
+            """, params)
+            return cur.fetchall()
+    finally:
+        conn.close()
+
+
+def has_khazana_thumbnail_v2(program_name, topic_id, lecture_id):
+    """Check if Khazana lecture has thumbnail in normalized schema"""
+    if not (program_name and topic_id and lecture_id):
+        return False
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT 1
+                FROM khazana_lectures l
+                JOIN khazana_topics t ON l.topic_id = t.id
+                JOIN khazana_programs p ON t.program_id = p.id
+                WHERE p.program_name=%s AND t.topic_id=%s AND l.lecture_id=%s
+                  AND l.thumbnail_blob IS NOT NULL
+            """, (program_name, topic_id, lecture_id))
+            return bool(cur.fetchone())
+    finally:
+        conn.close()

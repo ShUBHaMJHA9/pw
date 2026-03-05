@@ -147,7 +147,123 @@ CREATE TABLE IF NOT EXISTS lecture_uploads (
         REFERENCES lectures(batch_id, lecture_id)
 ) ENGINE=InnoDB;
 
-CREATE TABLE IF NOT EXISTS khazana_lecture_uploads (
+-- Khazana Programs (e.g., "JEE 2025", "NEET 2024")
+CREATE TABLE IF NOT EXISTS khazana_programs (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    program_id VARCHAR(128) NOT NULL,
+    program_name VARCHAR(255) NOT NULL,
+    thumbnail_url TEXT NULL,
+    thumbnail_mime VARCHAR(64) NULL,
+    thumbnail_size BIGINT NULL,
+    thumbnail_blob LONGBLOB NULL,
+    thumbnail_updated_at TIMESTAMP NULL DEFAULT NULL,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uniq_khazana_program (program_id)
+) ENGINE=InnoDB;
+
+-- Khazana Subjects (e.g., "Data Structure", "Physics")
+CREATE TABLE IF NOT EXISTS khazana_subjects (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    subject_name VARCHAR(255) NOT NULL,
+    subject_slug VARCHAR(255) NULL,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uniq_khazana_subject_name (subject_name)
+) ENGINE=InnoDB;
+
+-- Khazana Teachers (normalized from teachers table concept)
+CREATE TABLE IF NOT EXISTS khazana_teachers (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    teacher_name VARCHAR(255) NOT NULL,
+    teacher_slug VARCHAR(255) NULL,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uniq_khazana_teacher_name (teacher_name)
+) ENGINE=InnoDB;
+
+-- Khazana Topics (e.g., "Graph Theory", "Thermodynamics")
+CREATE TABLE IF NOT EXISTS khazana_topics (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    program_id BIGINT NOT NULL,
+    subject_id BIGINT NULL,
+    teacher_id BIGINT NULL,
+    topic_id VARCHAR(128) NOT NULL,
+    topic_name VARCHAR(255) NULL,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uniq_khazana_topic (program_id, topic_id),
+    KEY idx_khazana_topic_subject (subject_id),
+    KEY idx_khazana_topic_teacher (teacher_id),
+    CONSTRAINT fk_khazana_topic_program FOREIGN KEY (program_id)
+        REFERENCES khazana_programs(id) ON DELETE CASCADE,
+    CONSTRAINT fk_khazana_topic_subject FOREIGN KEY (subject_id)
+        REFERENCES khazana_subjects(id) ON DELETE SET NULL,
+    CONSTRAINT fk_khazana_topic_teacher FOREIGN KEY (teacher_id)
+        REFERENCES khazana_teachers(id) ON DELETE SET NULL
+) ENGINE=InnoDB;
+
+-- Khazana Lectures (video lectures)
+CREATE TABLE IF NOT EXISTS khazana_lectures (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    topic_id BIGINT NOT NULL,
+    lecture_id VARCHAR(128) NOT NULL,
+    lecture_name VARCHAR(255) NULL,
+    lecture_url TEXT NULL,
+    sub_topic_name VARCHAR(255) NULL,
+    thumbnail_url TEXT NULL,
+    thumbnail_mime VARCHAR(64) NULL,
+    thumbnail_size BIGINT NULL,
+    thumbnail_blob LONGBLOB NULL,
+    thumbnail_updated_at TIMESTAMP NULL DEFAULT NULL,
+    ia_identifier VARCHAR(255) NULL,
+    ia_url TEXT NULL,
+    status VARCHAR(32) NOT NULL DEFAULT 'pending',
+    server_id VARCHAR(128) NULL,
+    file_path TEXT NULL,
+    file_size BIGINT NULL,
+    upload_bytes BIGINT NULL,
+    upload_total BIGINT NULL,
+    upload_percent FLOAT NULL,
+    telegram_chat_id VARCHAR(128) NULL,
+    telegram_message_id VARCHAR(128) NULL,
+    telegram_file_id VARCHAR(255) NULL,
+    error_text TEXT NULL,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uniq_khazana_lecture (topic_id, lecture_id),
+    KEY idx_khazana_lecture_ia (ia_identifier),
+    KEY idx_khazana_lecture_status (status),
+    CONSTRAINT fk_khazana_lecture_topic FOREIGN KEY (topic_id)
+        REFERENCES khazana_topics(id) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+-- Khazana Assets (DPPs, notes, etc.)
+CREATE TABLE IF NOT EXISTS khazana_assets (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    topic_id BIGINT NOT NULL,
+    content_id VARCHAR(128) NOT NULL,
+    content_name VARCHAR(255) NULL,
+    kind VARCHAR(64) NOT NULL,
+    file_url TEXT NULL,
+    file_path TEXT NULL,
+    file_size BIGINT NULL,
+    ia_identifier VARCHAR(255) NULL,
+    ia_url TEXT NULL,
+    status VARCHAR(32) NOT NULL DEFAULT 'pending',
+    server_id VARCHAR(128) NULL,
+    error_text TEXT NULL,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uniq_khazana_asset (topic_id, content_id, kind),
+    KEY idx_khazana_asset_ia (ia_identifier),
+    KEY idx_khazana_asset_status (status),
+    CONSTRAINT fk_khazana_asset_topic FOREIGN KEY (topic_id)
+        REFERENCES khazana_topics(id) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+-- Legacy table for backward compatibility (to be migrated)
+CREATE TABLE IF NOT EXISTS khazana_lecture_uploads_old (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     program_name VARCHAR(128) NOT NULL,
     subject_name VARCHAR(128) NULL,
@@ -178,29 +294,6 @@ CREATE TABLE IF NOT EXISTS khazana_lecture_uploads (
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE KEY uniq_khazana_lecture (program_name, lecture_id, topic_name)
-) ENGINE=InnoDB;
-
-CREATE TABLE IF NOT EXISTS khazana_assets (
-    id BIGINT AUTO_INCREMENT PRIMARY KEY,
-    program_name VARCHAR(128) NOT NULL,
-    subject_name VARCHAR(128) NULL,
-    teacher_name VARCHAR(255) NULL,
-    topic_name VARCHAR(255) NULL,
-    sub_topic_name VARCHAR(255) NULL,
-    content_id VARCHAR(128) NOT NULL,
-    content_name VARCHAR(255) NULL,
-    kind VARCHAR(64) NOT NULL,
-    file_url TEXT NULL,
-    file_path TEXT NULL,
-    file_size BIGINT NULL,
-    ia_identifier VARCHAR(255) NULL,
-    ia_url TEXT NULL,
-    status VARCHAR(32) NOT NULL DEFAULT 'pending',
-    server_id VARCHAR(128) NULL,
-    error_text TEXT NULL,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE KEY uniq_khazana_asset (program_name, content_id, kind)
 ) ENGINE=InnoDB;
 
 CREATE TABLE IF NOT EXISTS dpp_backups (

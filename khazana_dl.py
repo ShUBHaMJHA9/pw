@@ -233,6 +233,23 @@ def _get_display_name(obj):
     return str(obj)
 
 
+def _get_teacher_label(obj):
+    """Build a readable teacher label from Khazana chapter payload."""
+    base = _get_display_name(obj)
+    if not isinstance(obj, dict):
+        return base
+
+    description = _get_val(obj, "description")
+    teacher_from_desc = None
+    if isinstance(description, str) and description.strip():
+        # API usually returns: "Pankaj Sharma Sir ;Hinglish"
+        teacher_from_desc = description.split(";", 1)[0].strip()
+
+    if base and base.strip().lower().endswith("by") and teacher_from_desc:
+        return f"{base} {teacher_from_desc}".strip()
+    return base
+
+
 def _get_any_id(obj):
     for key in ("id", "_id", "slug", "subjectId", "teacherId", "topicId", "subTopicId"):
         value = _get_val(obj, key)
@@ -606,6 +623,7 @@ def _download_lecture(
     upload_retries=2,
     subject_name=None,
     teacher_name=None,
+    topic_name=None,
     sub_topic_name=None,
     video_id=None,
 ):
@@ -617,7 +635,7 @@ def _download_lecture(
         return
     server_id = socket.gethostname()
     if db_logger:
-        existing = db_logger.get_khazana_upload_status(program_name, lecture_id, topic_name=topic_id)
+        existing = db_logger.get_khazana_lecture_status_v2(program_name, topic_id, lecture_id)
         force_mode = bool(os.getenv("KHZ_FORCE_DOWNLOAD"))
         if existing and existing.get("status") == "done" and not force_mode:
             debugger.info(f"Skipping: {lecture_name or lecture_id}")
@@ -647,17 +665,18 @@ def _download_lecture(
     thumb_mime = None
     if thumb_url and db_logger:
         try:
-            if not db_logger.has_khazana_thumbnail(program_name, lecture_id, topic_name=topic_id):
+            if not db_logger.has_khazana_thumbnail_v2(program_name, topic_id, lecture_id):
                 thumb_blob, thumb_mime = _download_thumbnail_bytes(thumb_url)
         except Exception:
             thumb_blob = None
             thumb_mime = None
     if db_logger:
         debugger.info(f"DB: {lecture_name or lecture_id} -> downloading")
-        db_logger.upsert_khazana_lecture(
+        db_logger.upsert_khazana_lecture_v2(
             program_name=program_name,
+            topic_id=topic_id,
             lecture_id=lecture_id,
-            topic_name=topic_id,
+            topic_name=topic_name,
             subject_name=subject_name,
             teacher_name=teacher_name,
             sub_topic_name=sub_topic_name,
@@ -694,7 +713,7 @@ def _download_lecture(
             id=lecture_id,
             name=lecture_name or lecture_id,
             batch_name=batch_name,
-            topic_name=topic_id,
+            topic_id=topic_id,
             lecture_url=lecture_url,
             video_id=video_id,
             directory=base_dir,
@@ -712,10 +731,11 @@ def _download_lecture(
         if db_logger:
             status = "done" if not upload_internet_archive else "downloaded"
             debugger.info(f"DB: {lecture_name or lecture_id} -> {status}")
-            db_logger.upsert_khazana_lecture(
+            db_logger.upsert_khazana_lecture_v2(
                 program_name=program_name,
                 lecture_id=lecture_id,
-                topic_name=topic_id,
+                topic_id=topic_id,
+                topic_name=topic_name,
                 subject_name=subject_name,
                 teacher_name=teacher_name,
                 sub_topic_name=sub_topic_name,
@@ -738,10 +758,10 @@ def _download_lecture(
                 tui.setup_upload_progress()
             if db_logger:
                 debugger.info(f"DB: {lecture_name or lecture_id} -> uploading")
-                db_logger.upsert_khazana_lecture(
+                db_logger.upsert_khazana_lecture_v2(
                     program_name=program_name,
                     lecture_id=lecture_id,
-                    topic_name=topic_id,
+                    topic_id=topic_id,
                     status="uploading",
                     server_id=server_id,
                     file_path=file_path if os.path.exists(file_path) else None,
@@ -781,10 +801,10 @@ def _download_lecture(
                 if db_logger:
                     debugger.info(f"DB: {lecture_name or lecture_id} -> done (IA)")
                     try:
-                        db_logger.upsert_khazana_lecture(
+                        db_logger.upsert_khazana_lecture_v2(
                             program_name=program_name,
                             lecture_id=lecture_id,
-                            topic_name=topic_id,
+                            topic_id=topic_id,
                             status="done",
                             server_id=server_id,
                             file_path=file_path if os.path.exists(file_path) else None,
@@ -806,10 +826,10 @@ def _download_lecture(
                         else:
                             if db_logger:
                                 try:
-                                    db_logger.upsert_khazana_lecture(
+                                    db_logger.upsert_khazana_lecture_v2(
                                         program_name=program_name,
                                         lecture_id=lecture_id,
-                                        topic_name=topic_id,
+                                        topic_id=topic_id,
                                         status="done",
                                         file_path=None,
                                         file_size=None,
@@ -822,10 +842,10 @@ def _download_lecture(
                     tui.finish_upload_progress(success=False)
                 error_text = last_error or "upload_failed"
                 if db_logger:
-                    db_logger.upsert_khazana_lecture(
+                    db_logger.upsert_khazana_lecture_v2(
                         program_name=program_name,
                         lecture_id=lecture_id,
-                        topic_name=topic_id,
+                        topic_id=topic_id,
                         status="failed",
                         server_id=server_id,
                         file_path=file_path if os.path.exists(file_path) else None,
@@ -841,10 +861,10 @@ def _download_lecture(
                     else:
                         if db_logger:
                             try:
-                                db_logger.upsert_khazana_lecture(
+                                db_logger.upsert_khazana_lecture_v2(
                                     program_name=program_name,
                                     lecture_id=lecture_id,
-                                    topic_name=topic_id,
+                                    topic_id=topic_id,
                                     status="failed",
                                     file_path=None,
                                     file_size=None,
@@ -853,10 +873,11 @@ def _download_lecture(
                                 debugger.error(f"Failed to clear file_path in DB after deletion: {e}")
     except Exception as e:
         if db_logger:
-            db_logger.upsert_khazana_lecture(
+            db_logger.upsert_khazana_lecture_v2(
                 program_name=program_name,
                 lecture_id=lecture_id,
-                topic_name=topic_id,
+                topic_id=topic_id,
+                topic_name=topic_name,
                 subject_name=subject_name,
                 teacher_name=teacher_name,
                 sub_topic_name=sub_topic_name,
@@ -888,6 +909,7 @@ def _download_asset(
     upload_retries=2,
     subject_name=None,
     teacher_name=None,
+    topic_name=None,
     sub_topic_name=None,
 ):
     tui, log_sink = _start_task_tui(f"Preparing asset: {content_name or content_id}")
@@ -931,7 +953,7 @@ def _download_asset(
             server_id=server_id,
             subject_name=subject_name,
             teacher_name=teacher_name,
-            topic_name=topic_id,
+            topic_name=topic_name,
             sub_topic_name=sub_topic_name,
         )
 
@@ -962,7 +984,7 @@ def _download_asset(
                 id=content_id,
                 name=safe_name,
                 batch_name=program_name,
-                topic_name=topic_id,
+                topic_id=topic_id,
                 lecture_url=file_url,
                 directory=asset_dir,
                 token=token,
@@ -1001,7 +1023,7 @@ def _download_asset(
                 server_id=server_id,
                 subject_name=subject_name,
                 teacher_name=teacher_name,
-                topic_name=topic_id,
+                topic_name=topic_name,
                 sub_topic_name=sub_topic_name,
             )
         debugger.success(f"Downloaded asset: {content_name or content_id}")
@@ -1244,13 +1266,13 @@ def main():
             continue
 
         teachers = teachers or []
-        teachers_sel = _pick_from_list(teachers, f"Teachers for {subject_label}:", _get_display_name)
+        teachers_sel = _pick_from_list(teachers, f"Teachers for {subject_label}:", _get_teacher_label)
         if not teachers_sel:
             continue
 
         for teacher in teachers_sel:
             teacher_id = _get_any_id(teacher) or _get_display_name(teacher)
-            teacher_label = _get_display_name(teacher)
+            teacher_label = _get_teacher_label(teacher)
             try:
                 topics = batch_api.process(
                     "topics",
@@ -1344,7 +1366,7 @@ def main():
                                 lecture_url=lecture_url,
                                 lecture_name=lecture_name,
                                 program_name=program_name,
-                                topic_id=subject_id,
+                                topic_id=topic_id,
                                 thumb_url=thumb_url,
                                 token=token,
                                 random_id=random_id,
@@ -1356,6 +1378,7 @@ def main():
                                 upload_retries=upload_retries,
                                 subject_name=subject_label,
                                 teacher_name=teacher_label,
+                                topic_name=topic_label,
                                 sub_topic_name=sub_topic_label,
                                 video_id=video_id,
                             )
@@ -1371,7 +1394,7 @@ def main():
                                     file_url=asset.get("file_url"),
                                     is_video=asset.get("is_video"),
                                     program_name=program_name,
-                                    topic_id=subject_id,
+                                    topic_id=topic_id,
                                     base_dir=base_dir,
                                     token=token,
                                     random_id=random_id,
@@ -1381,6 +1404,7 @@ def main():
                                     upload_retries=upload_retries,
                                     subject_name=subject_label,
                                     teacher_name=teacher_label,
+                                    topic_name=topic_label,
                                     sub_topic_name=sub_topic_label,
                                 )
 
