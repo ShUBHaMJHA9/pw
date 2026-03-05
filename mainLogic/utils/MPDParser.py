@@ -18,7 +18,7 @@ class AdaptationSetIsNotVideo(Exception):
 
 
 class MPDParser:
-    def __init__(self, url, extractSignature=True, signature=None, verbose=True):
+    def __init__(self, url, extractSignature=True, signature=None, cookies=None, verbose=True):
         self.url = url
         self.base_url = ""
         self.extractSignature = extractSignature
@@ -29,6 +29,7 @@ class MPDParser:
         self.video_set = None
         self.audio_segment_template = None
         self.video_segment_template = None
+        self.cookies = cookies
 
     def pre_process(self):
         if self.extractSignature:
@@ -76,7 +77,10 @@ class MPDParser:
 
     def load_manifest(self):
         # if self.base_url: # Original check was if base_url is present, but manifest URL is self.url
-        response = requests.get(self.url)
+        headers = {}
+        if getattr(self, 'cookies', None):
+            headers['Cookie'] = self.cookies
+        response = requests.get(self.url, headers=headers if headers else None)
         if response.status_code == 200:
             if self.verbose: # Moved verbose logging here
                 debugger.debug(f"Response from {self.url}")

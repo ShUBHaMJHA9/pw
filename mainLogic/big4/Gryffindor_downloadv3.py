@@ -92,7 +92,8 @@ class DownloaderV3:
             max_workers: int = 16,
             audio_dir: Optional[str] = "audio",
             video_dir: Optional[str] = "video",
-            show_progress_bar: bool = True
+                show_progress_bar: bool = True,
+                request_headers: dict = None
     ):
         self.tmp_dir = Path(tmp_dir)
         self.out_dir = Path(out_dir)
@@ -100,6 +101,7 @@ class DownloaderV3:
         self.progress_callback = progress_callback
         self.max_workers = max(4, min(32, max_workers))
         self.show_progress_bar = show_progress_bar
+        self.request_headers = request_headers or {}
 
         self.audio_dir = self.out_dir / audio_dir if audio_dir else self.out_dir
         self.video_dir = self.out_dir / video_dir if video_dir else self.out_dir
@@ -121,7 +123,7 @@ class DownloaderV3:
     def _download_segment(self, url: str, output_path: Path, retry_count: int = 3) -> bool:
         for attempt in range(retry_count):
             try:
-                response = requests.get(url, allow_redirects=True)
+                response = requests.get(url, allow_redirects=True, headers=self.request_headers if self.request_headers else None)
                 response.raise_for_status()
 
                 with open(output_path, 'wb') as f:

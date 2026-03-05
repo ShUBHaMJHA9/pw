@@ -25,7 +25,8 @@ class DownloaderTUI:
         self.console = Console()
         self.lock = Lock()
         self.log_messages: List[Dict] = []
-        self.max_log_lines = 20
+        self.max_log_lines = 100
+        self.status = "Ready"
 
         # Progress trackers
         self.audio_progress = None
@@ -36,6 +37,7 @@ class DownloaderTUI:
         # Stats
         self.audio_stats = {"total": 0, "successful": 0, "failed": []}
         self.video_stats = {"total": 0, "successful": 0, "failed": []}
+        self.upload_stats = {"total": 100, "completed": 0, "active": False}
         self.download_start_time = None
 
         # Layout elements
@@ -114,7 +116,15 @@ class DownloaderTUI:
             while len(self.log_messages) > self.max_log_lines:
                 self.log_messages.pop(0)
 
-            self._update_display()
+        # Update display OUTSIDE the lock to prevent blocking
+        self._update_display()
+
+    def set_status(self, status: str):
+        """Set a short status line shown in the footer"""
+        with self.lock:
+            self.status = status
+        # Update display OUTSIDE the lock
+        self._update_display()
 
     def _update_display(self):
         """Update the live display with current state"""
@@ -145,8 +155,11 @@ class DownloaderTUI:
         self.layout["logs"].update(logs_panel)
 
         # Footer
-        footer_text = Text("Press Ctrl+C to cancel", style="italic")
-        self.layout["footer"].update(Panel(footer_text))
+        footer = Table.grid(expand=True)
+        footer.add_column(ratio=4)
+        footer.add_column(ratio=1, justify="right")
+        footer.add_row(Text(self.status or ""), Text("Press Ctrl+C to cancel", style="italic"))
+        self.layout["footer"].update(Panel(footer, border_style="grey37"))
 
         return self.layout
 
@@ -164,10 +177,18 @@ class DownloaderTUI:
 
         # Re-create video progress bar if needed
         if self.video_stats["total"] > 0:
-            video_task = progress.add_task(
+            progress.add_task(
                 "[magenta]Video Download",
                 total=self.video_stats["total"],
                 completed=self.video_stats["successful"] + len(self.video_stats["failed"])
+            )
+
+        # Upload progress (0-100)
+        if self.upload_stats.get("active"):
+            progress.add_task(
+                "[yellow]IA Upload",
+                total=self.upload_stats.get("total", 100),
+                completed=self.upload_stats.get("completed", 0),
             )
 
         return Panel(progress, title="Download Progress", border_style="green")
@@ -203,6 +224,19 @@ class DownloaderTUI:
                 f"{completion:.1f}%"
             )
 
+        # Add upload stats
+        if self.upload_stats.get("active"):
+            uploaded = int(self.upload_stats.get("completed", 0))
+            total = int(self.upload_stats.get("total", 100))
+            completion = (100 * uploaded / total) if total else 0
+            table.add_row(
+                "Upload",
+                str(total),
+                str(uploaded),
+                "0",
+                f"{completion:.1f}%"
+            )
+
         return Panel(table, title="Download Statistics", border_style="green")
 
     def _generate_logs_panel(self):
@@ -227,7 +261,9 @@ class DownloaderTUI:
             self.audio_stats["total"] = total_segments
             self.audio_stats["successful"] = 0
             self.audio_stats["failed"] = []
-            self._update_display()
+            self.status = f"Preparing audio: {total_segments} segments"
+        # Update display OUTSIDE the lock
+        self._update_display()
 
     def setup_video_progress(self, total_segments: int):
         """Setup the video progress tracking"""
@@ -235,7 +271,9 @@ class DownloaderTUI:
             self.video_stats["total"] = total_segments
             self.video_stats["successful"] = 0
             self.video_stats["failed"] = []
-            self._update_display()
+            self.status = f"Preparing video: {total_segments} segments"
+        # Update display OUTSIDE the lock
+        self._update_display()
 
     def update_progress(self, media_type: str, segment_num: int, success: bool):
         """Update progress for a specific media type"""
@@ -250,10 +288,11 @@ class DownloaderTUI:
             else:
                 stats["failed"].append(segment_num)
 
-            self._update_display()
+            # Update status briefly
+            self.status = f"{media_type.title()}: {stats['successful']}/{stats['total']} ({int(((stats['successful'] + len(stats['failed']))/stats['total'])*100) if stats['total'] else 0}%)"
 
-            # Return progress info in the same format as before
-            return {
+            # Build return info while holding lock
+            result = {
                 "type": media_type,
                 "total": stats["total"],
                 "current": stats["successful"] + len(stats["failed"]),
@@ -264,6 +303,37 @@ class DownloaderTUI:
                 "timestamp": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
             }
 
+        # Update display OUTSIDE the lock
+        self._update_display()
+        return result
+
+    def setup_upload_progress(self):
+        """Initialize IA upload progress bar"""
+        with self.lock:
+            self.upload_stats = {"total": 100, "completed": 0, "active": True}
+            self.status = "IA upload started"
+        self._update_display()
+
+    def update_upload_progress(self, percent: int, status_msg: Optional[str] = None):
+        """Update IA upload progress (0-100)"""
+        with self.lock:
+            pct = max(0, min(100, int(percent)))
+            self.upload_stats["active"] = True
+            self.upload_stats["completed"] = pct
+            if status_msg:
+                self.status = status_msg
+            else:
+                self.status = f"IA Upload: {pct}%"
+        self._update_display()
+
+    def finish_upload_progress(self, success: bool = True):
+        """Finalize IA upload progress"""
+        with self.lock:
+            self.upload_stats["active"] = True
+            self.upload_stats["completed"] = 100 if success else self.upload_stats.get("completed", 0)
+            self.status = "IA upload done" if success else "IA upload failed"
+        self._update_display()
+
 # Modified ProgressTracker to work with the new TUI
 class ProgressTracker:
     def __init__(self, total_segments: int, media_type: str, tui: DownloaderTUI, show_tqdm: bool = False):
@@ -273,6 +343,7 @@ class ProgressTracker:
         self.lock = Lock()
         self.failed_segments = []
         self.tui = tui
+        self.log_interval = max(1, total_segments // 100)  # Log every 1% of progress
 
         # Setup progress in TUI
         if media_type == "audio":
@@ -287,111 +358,130 @@ class ProgressTracker:
             self.current += 1
             if not success:
                 self.failed_segments.append(segment_num)
+                # Always log failures
+                self.tui.log(f"{self.media_type} segment {segment_num} failed", "ERROR")
+            elif self.current % self.log_interval == 0 and self.current > 0:
+                # Only log progress every 1% to avoid excessive updates
+                percent = int((self.current / self.total) * 100)
+                self.tui.log(f"{self.media_type}: {self.current}/{self.total} ({percent}%)", "INFO")
 
-            # Log the update
-            msg = f"{self.media_type} segment {segment_num} {'✓' if success else '✗'}"
-            if not success:
-                self.tui.log(msg, "ERROR")
-            elif self.tui.verbose:
-                self.tui.log(msg, "DEBUG")
-
-            # Update TUI progress
+            # Update TUI progress (non-blocking call)
             return self.tui.update_progress(self.media_type, segment_num, success)
 
     def close(self):
         self.tui.log(f"{self.media_type.capitalize()} download complete: {self.current - len(self.failed_segments)}/{self.total} segments successful", "INFO")
 
 # Example of how to modify the DownloaderV3 class to use the new TUI
-def update_downloader_v3_with_tui(downloader:Gryffindor_downloadv3.DownloaderV3):
-    # Replace the TerminalOutput with our new TUI
-    downloader.terminal = DownloaderTUI(downloader.verbose)
-    downloader.terminal.start()
+def update_downloader_v3_with_tui(downloader:Gryffindor_downloadv3.DownloaderV3, tui: DownloaderTUI = None, manage_lifecycle: bool = True):
+    if tui is None:
+        tui = DownloaderTUI(downloader.verbose)
+
+    downloader.terminal = tui
+    if manage_lifecycle:
+        downloader.terminal.start()
 
     # Override the original _download_media method to use our new ProgressTracker
     #   original_download_media = downloader._download_media
 
     def _download_media_with_tui(media_data, media_type, output_dir):
-        # Same implementation but using our TUI-enabled ProgressTracker
-        if not media_data or "segments" not in media_data:
-            downloader.terminal.log(f"No {media_type} data provided", "WARNING")
-            downloader.debugger.warning(f"No {media_type} data provided")
-            return DownloadResult(None, output_dir, 0, 0, [])
+        """Download media with TUI progress tracking"""
+        downloader.terminal.log(f"{media_type}: Starting", "INFO")
+        
+        try:
+            if not media_data or "segments" not in media_data:
+                downloader.terminal.log(f"{media_type}: No data", "WARNING")
+                return DownloadResult(None, output_dir, 0, 0, [])
 
-        total_segments = len(media_data["segments"])
-        init_file_path = None
+            total_segments = len(media_data["segments"])
+            downloader.terminal.log(f"{media_type}: {total_segments} segments", "INFO")
+            
+            init_file_path = None
+            downloader.terminal.set_status(f"{media_type} downloading")
+            
+            # Match original ProgressTracker initialization
+            progress_tracker = ProgressTracker(total_segments, media_type, downloader.terminal, False)
 
-        progress_tracker = ProgressTracker(
-            total_segments,
-            media_type,
-            downloader.terminal,
-            False  # No need for tqdm progress bars
-        )
+            # Download init segment
+            if "init" in media_data:
+                init_filename = downloader._get_file_name_from_url(media_data["init"], 0, media_type)
+                init_file_path = output_dir / init_filename
+                if not downloader._download_segment(media_data["init"], init_file_path):
+                    downloader.terminal.log(f"{media_type}: Init failed", "ERROR")
+                    return DownloadResult(None, output_dir, total_segments, 0, list(range(1, total_segments + 1)))
 
-        # Rest of the original _download_media implementation...
-        # Download init segment first
-        if "init" in media_data:
-            init_filename = downloader._get_file_name_from_url(media_data["init"], 0, media_type)
-            init_file_path = output_dir / init_filename
-            if not downloader._download_segment(media_data["init"], init_file_path):
-                downloader.terminal.log(f"Failed to download {media_type} init segment", "ERROR")
-                downloader.debugger.error(f"Failed to download {media_type} init segment")
-                return DownloadResult(None, output_dir, total_segments, 0, list(range(1, total_segments + 1)))
+            # Build tasks - match original exactly
+            download_tasks = []
+            for segment_num, segment_url in media_data["segments"].items():
+                segment_filename = downloader._get_file_name_from_url(segment_url, int(segment_num), media_type)
+                segment_path = output_dir / segment_filename
+                download_tasks.append((segment_url, segment_path, int(segment_num), progress_tracker))
 
-            downloader.terminal.log(f"Downloaded {media_type} init segment: {init_filename}", "INFO")
-            if downloader.verbose:
-                downloader.debugger.info(f"Downloaded {media_type} init segment: {init_filename}")
+            downloader.terminal.log(f"{media_type}: {len(download_tasks)} queued", "INFO")
+            
+            # Download segments - match original: NO TIMEOUT
+            successful_segments = 0
+            with concurrent.futures.ThreadPoolExecutor(max_workers=downloader.max_workers) as executor:
+                futures = [executor.submit(downloader._process_segment, task) for task in download_tasks]
 
-        # Prepare segment download tasks
-        download_tasks = []
-        for segment_num, segment_url in media_data["segments"].items():
-            segment_filename = downloader._get_file_name_from_url(
-                segment_url, int(segment_num), media_type
-            )
-            segment_path = output_dir / segment_filename
+                for i, future in enumerate(concurrent.futures.as_completed(futures), 1):
+                    try:
+                        result = future.result()  # NO TIMEOUT - match original
+                        if result:
+                            successful_segments += 1
+                        if i % max(1, len(futures) // 10) == 0 or i == 1:
+                            percent = int((i / len(futures)) * 100)
+                            msg = f"{media_type}: {i}/{len(futures)} ({percent}%)"
+                            downloader.terminal.log(msg, "INFO")
+                    except Exception as e:
+                        downloader.terminal.log(f"{media_type} error: {str(e)[:60]}", "ERROR")
+                        downloader.debugger.error(f"{media_type} segment exception: {e}")
 
-            download_tasks.append((
-                segment_url,
-                segment_path,
-                int(segment_num),
-                progress_tracker
-            ))
-
-        successful_segments = 0
-        with concurrent.futures.ThreadPoolExecutor(max_workers=downloader.max_workers) as executor:
-            futures = [executor.submit(downloader._process_segment, task) for task in download_tasks]
-
-            for future in concurrent.futures.as_completed(futures):
-                if future.result():
-                    successful_segments += 1
-
-        # Final status update
-        downloader.terminal.log(
-            f"{media_type.capitalize()} download complete: {successful_segments}/{total_segments} segments successful",
-            "INFO"
-        )
-
-        progress_tracker.close()
-
-        return DownloadResult(
-            init_file_path,
-            output_dir,
-            total_segments,
-            successful_segments,
-            progress_tracker.failed_segments
-        )
+            downloader.terminal.log(f"{media_type}: {successful_segments}/{total_segments}", "INFO")
+            progress_tracker.close()
+            
+            return DownloadResult(init_file_path, output_dir, total_segments, successful_segments, progress_tracker.failed_segments)
+        
+        except Exception as e:
+            downloader.terminal.log(f"_download_media_with_tui EXCEPTION: {str(e)[:150]}", "ERROR")
+            downloader.debugger.error(f"_download_media_with_tui error: {e}")
+            import traceback
+            downloader.terminal.log(f"Traceback: {traceback.format_exc()[:300]}", "ERROR")
+            raise
 
     # Replace the original method with our enhanced version
+    # Note: We assign the function directly (not as a bound method) because it closes over 'downloader'
+    original_download_media = downloader._download_media
     downloader._download_media = _download_media_with_tui
+    downloader.terminal.log("TUI download wrapper active", "INFO")
 
     # Make sure to stop the TUI when done
     original_download_all = downloader.download_all
     def download_all_with_tui(urls):
+        import time
+        downloader.terminal.log("Download started", "INFO")
+        start_time = time.time()
         try:
-            return original_download_all(urls)
+            downloader.terminal.set_status("Downloading...")
+            result = original_download_all(urls)
+            
+            elapsed = time.time() - start_time
+            downloader.terminal.log(f"Download finished in {elapsed:.1f}s", "INFO")
+            return result
+        except concurrent.futures.TimeoutError as e:
+            elapsed = time.time() - start_time
+            downloader.terminal.log(f"Download timeout after {elapsed:.1f}s", "ERROR")
+            raise
+        except Exception as e:
+            elapsed = time.time() - start_time
+            downloader.terminal.log(f"Download failed after {elapsed:.1f}s: {str(e)[:100]}", "ERROR")
+            raise
         finally:
-            downloader.terminal.stop()
+            downloader.terminal.set_status("Done")
+            if manage_lifecycle:
+                downloader.terminal.stop()
 
     downloader.download_all = download_all_with_tui
+    downloader.terminal.log(f"Wrapped download_all method", "INFO")
 
     return downloader
 

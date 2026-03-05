@@ -72,32 +72,34 @@ class CheckState:
         """Validates and extracts token and random ID from token data."""
         import json
 
-        # return token_data.get('token') or token_data.get('access_token'), token_data.get('random_id',self.default_random_id)
-        # token = data.get('token') or data.get('access_token')
-        #                 random_id = data.get('randomId', "a3e290fa-ea36-4012-9124-8908794c33aa")
+        if not token_data:
+            raise TokenInvalid()
+
+        token = None
+        random_id = self.default_random_id
+
+        # Accept dict-style token config
         if isinstance(token_data, dict):
-            pass
+            token = token_data.get('token') or token_data.get('access_token')
+            random_id = token_data.get('random_id') or token_data.get('randomId') or self.default_random_id
 
-        elif token_data.startswith("{"):
-            try:
-                # this is the token data that is being passed to the json loads
-                data = json.loads(token_data)
-                token_data = data
+        # Accept plain JWT string or JSON string token config
+        elif isinstance(token_data, str):
+            token_data = token_data.strip()
+            if token_data.startswith("{"):
+                try:
+                    data = json.loads(token_data)
+                    token = data.get('token') or data.get('access_token')
+                    random_id = data.get('random_id') or data.get('randomId') or self.default_random_id
+                except json.JSONDecodeError as e:
+                    if verbose:
+                        debugger.error(f"Error decoding token data: {e}")
+                    raise TokenInvalid()
+            else:
+                # Raw JWT token string
+                token = token_data
 
-            except json.JSONDecodeError as e:
-                if verbose:
-                    debugger.error(f"Error decoding token data: {e}")
-                raise TokenInvalid()
-
-        if "token" in token_data:
-            token = token_data.get('token')
-            random_id = token_data.get('randomId', self.default_random_id)
-
-        elif "access_token" in token_data:
-            token = token_data.get('access_token')
-            random_id = token_data.get('randomId', self.default_random_id)
-
-        else:
+        if not token:
             if verbose:
                 debugger.error("Invalid Token Data")
             raise TokenInvalid()
@@ -158,10 +160,13 @@ class CheckState:
                 try:
                     token, random_id = self.validate_token(token, verbose)
 
-                    # save the token config (which can be used to get the token)
-                    prefs['token_config'] = prefs.get('token')
+                    # Save normalized token config for downstream modules
+                    prefs['token_config'] = {
+                        'access_token': token,
+                        'random_id': random_id,
+                    }
 
-                    # prefs token is the actual token
+                    # Keep plain token fields for backward compatibility
                     prefs['token'] = token
                     prefs['random_id'] = random_id
 

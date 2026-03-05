@@ -110,6 +110,61 @@ def _serialize(obj):
     except Exception:
         return None
 
+
+def _build_dpp_metadata(lecture, lec_name, cname, subj_slug):
+    """Build metadata dict for a lecture/DPP: include video uid, questions, solutions."""
+    meta = {
+        'lecture_name': lec_name,
+        'chapter': cname,
+        'subject': subj_slug,
+        'videoDetails': _serialize(getattr(lecture, 'videoDetails', None))
+    }
+
+    # try to extract a video uid from common fields
+    vd = getattr(lecture, 'videoDetails', None) or {}
+    video_uid = None
+    if isinstance(vd, dict):
+        for k in ('videoId', 'uid', 'id', 'video_uid'):
+            if k in vd and vd.get(k):
+                video_uid = vd.get(k)
+                break
+    else:
+        # if object-like, try attributes
+        for k in ('videoId', 'uid', 'id', 'video_uid'):
+            val = getattr(vd, k, None)
+            if val:
+                video_uid = val
+                break
+    if video_uid:
+        meta['video_uid'] = video_uid
+
+    # capture any question/solution-like structures heuristically
+    qs = []
+    sols = []
+    # common locations: lecture.questions, lecture.tests, lecture.attachments
+    for attr in ('questions', 'tests', 'attachments', 'homeworks'):
+        val = getattr(lecture, attr, None)
+        if val:
+            try:
+                qs.append(_serialize(val))
+            except Exception:
+                pass
+
+    # also inspect videoDetails for subtitles/solutions
+    try:
+        vd_serial = _serialize(vd)
+        if vd_serial:
+            sols.append(vd_serial)
+    except Exception:
+        pass
+
+    if qs:
+        meta['questions'] = qs
+    if sols:
+        meta['solutions'] = sols
+
+    return meta
+
 for subject in subjects:
     subj_slug = getattr(subject, "slug", None)
     subj_name = getattr(subject, "name", None) or subj_slug
@@ -204,7 +259,7 @@ for subject in subjects:
                         msg_id = resp.get('message_id') if isinstance(resp, dict) else None
                         print('   -> uploaded', msg_chat, msg_id)
                         if db:
-                            db.upsert_dpp_backup(batch_id, lec_id, kind='dpp', file_path=file_path, file_size=os.path.getsize(file_path) if os.path.exists(file_path) else None, telegram_chat_id=str(msg_chat) if msg_chat else None, telegram_message_id=str(msg_id) if msg_id else None, metadata=json.dumps({'lecture_name': lec_name, 'chapter': cname, 'subject': subj_slug, 'videoDetails': _serialize(getattr(lecture,'videoDetails', None))}), status='done')
+                            db.upsert_dpp_backup(batch_id, lec_id, kind='dpp', file_path=file_path, file_size=os.path.getsize(file_path) if os.path.exists(file_path) else None, telegram_chat_id=str(msg_chat) if msg_chat else None, telegram_message_id=str(msg_id) if msg_id else None, metadata=json.dumps(_build_dpp_metadata(lecture, lec_name, cname, subj_slug)), status='done')
                 finally:
                     if old is None:
                         os.environ.pop('TELEGRAM_CHAT_ID', None)
@@ -213,7 +268,7 @@ for subject in subjects:
             else:
                 # Only record metadata even if not uploading
                 if db:
-                    db.upsert_dpp_backup(batch_id, lec_id, kind='dpp', file_path=file_path, file_size=os.path.getsize(file_path) if file_path and os.path.exists(file_path) else None, metadata=json.dumps({'lecture_name': lec_name, 'chapter': cname, 'subject': subj_slug, 'videoDetails': _serialize(getattr(lecture,'videoDetails', None))}), status='pending')
+                    db.upsert_dpp_backup(batch_id, lec_id, kind='dpp', file_path=file_path, file_size=os.path.getsize(file_path) if file_path and os.path.exists(file_path) else None, metadata=json.dumps(_build_dpp_metadata(lecture, lec_name, cname, subj_slug)), status='pending')
 
         # --- Fetch DPP PDFs (attachments) for this chapter ---
         if args.dpp_pdfs:

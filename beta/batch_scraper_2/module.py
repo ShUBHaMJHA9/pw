@@ -16,32 +16,62 @@ except ImportError:
 batch_api = None
 debugger = glv_var.debugger # Assuming debugger is always available through glv_var
 
+def _extract_token_info_from_prefs(prefs):
+    token_obj = prefs.get("token_config")
+
+    if isinstance(token_obj, str):
+        return token_obj, prefs.get("random_id") or prefs.get("randomId")
+
+    if isinstance(token_obj, dict):
+        access_token = token_obj.get("access_token") or token_obj.get("token")
+        random_id = token_obj.get("random_id") or token_obj.get("randomId")
+        if access_token:
+            return access_token, random_id
+
+    top_token = prefs.get("token")
+    if isinstance(top_token, str) and top_token.strip():
+        return top_token.strip(), prefs.get("random_id") or prefs.get("randomId")
+    if isinstance(top_token, dict):
+        access_token = top_token.get("access_token") or top_token.get("token")
+        random_id = top_token.get("random_id") or top_token.get("randomId")
+        if access_token:
+            return access_token, random_id
+
+    users = prefs.get("users") if isinstance(prefs.get("users"), list) else []
+    for user in users:
+        if not isinstance(user, dict):
+            continue
+        access_token = user.get("access_token") or user.get("token")
+        if isinstance(access_token, dict):
+            access_token = access_token.get("access_token") or access_token.get("token")
+        if access_token:
+            random_id = user.get("random_id") or user.get("randomId")
+            return access_token, random_id
+
+    return None, None
+
+
 try:
     # Ensure dependencies are checked and tokens are retrieved
     re_check_dependencies()
     prefs = glv_var.vars.get("prefs", {})
 
+    access_token, random_id = _extract_token_info_from_prefs(prefs)
 
-    token = prefs.get("token_config", {})
-    
-    access_token = None
-    try:
-        access_token = token["access_token"]
-    except KeyError:
-        try:
-            access_token = token["token"]
-        except KeyError:
-            debugger.error("Access token not found in 'access_token' or 'token' fields.")
-    
-    random_id = token.get("random_id") or token.get("randomId")
-    
     if access_token:
         try:
             from beta.batch_scraper_2.Endpoints import Endpoints
+            # Allow optional Khazana cookies to be read from preferences
+            khazana_cookies = None
+            try:
+                khazana_cookies = prefs.get('khazana_cookies') or prefs.get('khazana_cookie')
+            except Exception:
+                khazana_cookies = None
+
             if random_id is None:
-                batch_api = Endpoints(verbose=False).set_token(access_token)
+                batch_api = Endpoints(verbose=False).set_token(access_token, cookies=khazana_cookies)
             else:
-                batch_api = Endpoints(verbose=False).set_token(access_token, random_id=random_id)
+                batch_api = Endpoints(verbose=False).set_token(access_token, random_id=random_id, cookies=khazana_cookies)
         except Exception as e:
             debugger.error(f"Failed to create batch_api instance, maybe the access_token is not available or Endpoints class is missing: {e}")
             debugger.error("Scraper may not work as intended.")

@@ -62,6 +62,7 @@ class Debugger:
         self.show_time = show_time
         self.show_location = show_location
         self.column_widths = column_widths or {"level": 10, "time": 20, "location": 20, "message": 50}
+        self._log_sinks = []
 
         # To ensure consistent spacing, we need to track actual visible text lengths
         # when ANSI color codes are used
@@ -184,7 +185,27 @@ class Debugger:
         if not self.enabled or self.LEVELS.get(level, 0) < self.level:
             return
 
-        print(self._format(level, message))
+        formatted = self._format(level, message)
+        print(formatted)
+
+        if self._log_sinks:
+            for sink in list(self._log_sinks):
+                try:
+                    sink(level=level, message=str(message), formatted=formatted)
+                except Exception:
+                    continue
+
+    def add_log_sink(self, sink):
+        if not callable(sink):
+            return
+        if sink not in self._log_sinks:
+            self._log_sinks.append(sink)
+
+    def remove_log_sink(self, sink):
+        try:
+            self._log_sinks.remove(sink)
+        except ValueError:
+            pass
 
     def info(self, message):
         self.log(message, "INFO")

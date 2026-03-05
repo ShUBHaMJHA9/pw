@@ -259,6 +259,68 @@ def ensure_schema():
             )
             cur.execute(
                 """
+                CREATE TABLE IF NOT EXISTS khazana_lecture_uploads (
+                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    program_name VARCHAR(128) NOT NULL,
+                    subject_name VARCHAR(128) NULL,
+                    teacher_name VARCHAR(255) NULL,
+                    topic_name VARCHAR(255) NULL,
+                    sub_topic_name VARCHAR(255) NULL,
+                    lecture_id VARCHAR(128) NOT NULL,
+                    lecture_name VARCHAR(255) NULL,
+                    lecture_url TEXT NULL,
+                    thumbnail_url TEXT NULL,
+                    thumbnail_mime VARCHAR(64) NULL,
+                    thumbnail_size BIGINT NULL,
+                    thumbnail_blob LONGBLOB NULL,
+                    thumbnail_updated_at TIMESTAMP NULL DEFAULT NULL,
+                    ia_identifier VARCHAR(255) NULL,
+                    ia_url TEXT NULL,
+                    status VARCHAR(32) NOT NULL DEFAULT 'pending',
+                    server_id VARCHAR(128) NULL,
+                    file_path TEXT NULL,
+                    file_size BIGINT NULL,
+                    upload_bytes BIGINT NULL,
+                    upload_total BIGINT NULL,
+                    upload_percent FLOAT NULL,
+                    telegram_chat_id VARCHAR(128) NULL,
+                    telegram_message_id VARCHAR(128) NULL,
+                    telegram_file_id VARCHAR(255) NULL,
+                    error_text TEXT NULL,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE KEY uniq_khazana_lecture (program_name, lecture_id, topic_name)
+                ) ENGINE=InnoDB;
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS khazana_assets (
+                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    program_name VARCHAR(128) NOT NULL,
+                    subject_name VARCHAR(128) NULL,
+                    teacher_name VARCHAR(255) NULL,
+                    topic_name VARCHAR(255) NULL,
+                    sub_topic_name VARCHAR(255) NULL,
+                    content_id VARCHAR(128) NOT NULL,
+                    content_name VARCHAR(255) NULL,
+                    kind VARCHAR(64) NOT NULL,
+                    file_url TEXT NULL,
+                    file_path TEXT NULL,
+                    file_size BIGINT NULL,
+                    ia_identifier VARCHAR(255) NULL,
+                    ia_url TEXT NULL,
+                    status VARCHAR(32) NOT NULL DEFAULT 'pending',
+                    server_id VARCHAR(128) NULL,
+                    error_text TEXT NULL,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE KEY uniq_khazana_asset (program_name, content_id, kind)
+                ) ENGINE=InnoDB;
+                """
+            )
+            cur.execute(
+                """
                 CREATE TABLE IF NOT EXISTS dpp_backups (
                     id BIGINT AUTO_INCREMENT PRIMARY KEY,
                     batch_id VARCHAR(128) NOT NULL,
@@ -372,6 +434,23 @@ def ensure_schema():
             if cur.fetchone()["cnt"] == 0:
                 cur.execute("ALTER TABLE lectures ADD COLUMN display_order INT NULL")
 
+            for column_name, ddl in (
+                ("thumbnail_url", "ALTER TABLE lectures ADD COLUMN thumbnail_url TEXT NULL"),
+                ("thumbnail_mime", "ALTER TABLE lectures ADD COLUMN thumbnail_mime VARCHAR(64) NULL"),
+                ("thumbnail_size", "ALTER TABLE lectures ADD COLUMN thumbnail_size BIGINT NULL"),
+                ("thumbnail_blob", "ALTER TABLE lectures ADD COLUMN thumbnail_blob LONGBLOB NULL"),
+                ("thumbnail_updated_at", "ALTER TABLE lectures ADD COLUMN thumbnail_updated_at TIMESTAMP NULL DEFAULT NULL"),
+            ):
+                cur.execute(
+                    """
+                    SELECT COUNT(*) AS cnt FROM INFORMATION_SCHEMA.COLUMNS
+                    WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'lectures' AND COLUMN_NAME = %s
+                    """,
+                    (column_name,),
+                )
+                if cur.fetchone()["cnt"] == 0:
+                    cur.execute(ddl)
+
             cur.execute(
                 """
                 SELECT COUNT(*) AS cnt FROM INFORMATION_SCHEMA.COLUMNS
@@ -406,6 +485,40 @@ def ensure_schema():
             )
             if cur.fetchone()["cnt"] == 0:
                 cur.execute("ALTER TABLE lecture_uploads ADD COLUMN ia_url TEXT NULL")
+
+            for column_name, ddl in (
+                ("thumbnail_url", "ALTER TABLE khazana_lecture_uploads ADD COLUMN thumbnail_url TEXT NULL"),
+                ("thumbnail_mime", "ALTER TABLE khazana_lecture_uploads ADD COLUMN thumbnail_mime VARCHAR(64) NULL"),
+                ("thumbnail_size", "ALTER TABLE khazana_lecture_uploads ADD COLUMN thumbnail_size BIGINT NULL"),
+                ("thumbnail_blob", "ALTER TABLE khazana_lecture_uploads ADD COLUMN thumbnail_blob LONGBLOB NULL"),
+                ("thumbnail_updated_at", "ALTER TABLE khazana_lecture_uploads ADD COLUMN thumbnail_updated_at TIMESTAMP NULL DEFAULT NULL"),
+                ("ia_identifier", "ALTER TABLE khazana_lecture_uploads ADD COLUMN ia_identifier VARCHAR(255) NULL"),
+                ("ia_url", "ALTER TABLE khazana_lecture_uploads ADD COLUMN ia_url TEXT NULL"),
+            ):
+                cur.execute(
+                    """
+                    SELECT COUNT(*) AS cnt FROM INFORMATION_SCHEMA.COLUMNS
+                    WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'khazana_lecture_uploads' AND COLUMN_NAME = %s
+                    """,
+                    (column_name,),
+                )
+                if cur.fetchone()["cnt"] == 0:
+                    cur.execute(ddl)
+
+            for column_name, ddl in (
+                ("file_url", "ALTER TABLE khazana_assets ADD COLUMN file_url TEXT NULL"),
+                ("ia_identifier", "ALTER TABLE khazana_assets ADD COLUMN ia_identifier VARCHAR(255) NULL"),
+                ("ia_url", "ALTER TABLE khazana_assets ADD COLUMN ia_url TEXT NULL"),
+            ):
+                cur.execute(
+                    """
+                    SELECT COUNT(*) AS cnt FROM INFORMATION_SCHEMA.COLUMNS
+                    WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'khazana_assets' AND COLUMN_NAME = %s
+                    """,
+                    (column_name,),
+                )
+                if cur.fetchone()["cnt"] == 0:
+                    cur.execute(ddl)
 
             _try_execute(
                 "CREATE INDEX idx_lecture_subject ON lectures (subject_id)"
@@ -998,6 +1111,85 @@ def get_caption_payload(batch_id, lecture_id):
         conn.close()
 
 
+def has_lecture_thumbnail(batch_id, lecture_id):
+    if not (batch_id and lecture_id):
+        return False
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT thumbnail_blob
+                FROM lectures
+                WHERE batch_id=%s AND lecture_id=%s
+                """,
+                (batch_id, lecture_id),
+            )
+            row = cur.fetchone()
+            blob = row.get("thumbnail_blob") if row else None
+            return bool(blob)
+    finally:
+        conn.close()
+
+
+def get_lecture_thumbnail_blob(batch_id, lecture_id):
+    if not (batch_id and lecture_id):
+        return None, None
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT thumbnail_blob, thumbnail_mime
+                FROM lectures
+                WHERE batch_id=%s AND lecture_id=%s
+                """,
+                (batch_id, lecture_id),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None, None
+            return row.get("thumbnail_blob"), row.get("thumbnail_mime")
+    finally:
+        conn.close()
+
+
+def update_lecture_thumbnail(batch_id, lecture_id, thumbnail_blob, thumbnail_mime=None, thumbnail_url=None):
+    if not (batch_id and lecture_id and thumbnail_blob):
+        return
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT IGNORE INTO lectures (batch_id, lecture_id)
+                VALUES (%s, %s)
+                """,
+                (batch_id, lecture_id),
+            )
+            cur.execute(
+                """
+                UPDATE lectures
+                SET thumbnail_blob=%s,
+                    thumbnail_mime=%s,
+                    thumbnail_size=%s,
+                    thumbnail_url=COALESCE(%s, thumbnail_url),
+                    thumbnail_updated_at=NOW()
+                WHERE batch_id=%s AND lecture_id=%s
+                """,
+                (
+                    thumbnail_blob,
+                    thumbnail_mime,
+                    len(thumbnail_blob),
+                    thumbnail_url,
+                    batch_id,
+                    lecture_id,
+                ),
+            )
+    finally:
+        conn.close()
+
+
 def get_recorded_file_path(batch_id, lecture_id):
     """Return a recorded local file path for a lecture if present in upload/job records.
 
@@ -1080,6 +1272,378 @@ def get_dpp_backup(batch_id, lecture_id):
             cur.execute(
                 "SELECT * FROM dpp_backups WHERE batch_id=%s AND lecture_id=%s",
                 (batch_id, lecture_id),
+            )
+            return cur.fetchone()
+    finally:
+        conn.close()
+
+
+def upsert_khazana_lecture(
+    program_name,
+    lecture_id,
+    topic_name=None,
+    subject_name=None,
+    teacher_name=None,
+    sub_topic_name=None,
+    lecture_name=None,
+    lecture_url=None,
+    thumbnail_blob=None,
+    thumbnail_mime=None,
+    thumbnail_url=None,
+    thumbnail_size=None,
+    ia_identifier=None,
+    ia_url=None,
+    status=None,
+    server_id=None,
+    file_path=None,
+    file_size=None,
+    upload_bytes=None,
+    upload_total=None,
+    upload_percent=None,
+    telegram_chat_id=None,
+    telegram_message_id=None,
+    telegram_file_id=None,
+    error=None,
+):
+    if not (program_name and lecture_id):
+        return
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO khazana_lecture_uploads (
+                    program_name,
+                    subject_name,
+                    teacher_name,
+                    topic_name,
+                    sub_topic_name,
+                    lecture_id,
+                    lecture_name,
+                    lecture_url,
+                    thumbnail_url,
+                    thumbnail_mime,
+                    thumbnail_size,
+                    thumbnail_blob,
+                    ia_identifier,
+                    ia_url,
+                    status,
+                    server_id,
+                    file_path,
+                    file_size,
+                    upload_bytes,
+                    upload_total,
+                    upload_percent,
+                    telegram_chat_id,
+                    telegram_message_id,
+                    telegram_file_id,
+                    error_text
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, COALESCE(%s, 'pending'), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                    subject_name=COALESCE(VALUES(subject_name), subject_name),
+                    teacher_name=COALESCE(VALUES(teacher_name), teacher_name),
+                    topic_name=COALESCE(VALUES(topic_name), topic_name),
+                    sub_topic_name=COALESCE(VALUES(sub_topic_name), sub_topic_name),
+                    lecture_name=COALESCE(VALUES(lecture_name), lecture_name),
+                    lecture_url=COALESCE(VALUES(lecture_url), lecture_url),
+                    thumbnail_url=COALESCE(VALUES(thumbnail_url), thumbnail_url),
+                    thumbnail_mime=COALESCE(VALUES(thumbnail_mime), thumbnail_mime),
+                    thumbnail_size=COALESCE(VALUES(thumbnail_size), thumbnail_size),
+                    thumbnail_blob=COALESCE(VALUES(thumbnail_blob), thumbnail_blob),
+                    thumbnail_updated_at=CASE
+                        WHEN VALUES(thumbnail_blob) IS NOT NULL THEN NOW()
+                        ELSE thumbnail_updated_at
+                    END,
+                    ia_identifier=COALESCE(VALUES(ia_identifier), ia_identifier),
+                    ia_url=COALESCE(VALUES(ia_url), ia_url),
+                    status=COALESCE(VALUES(status), status),
+                    server_id=COALESCE(VALUES(server_id), server_id),
+                    file_path=COALESCE(VALUES(file_path), file_path),
+                    file_size=COALESCE(VALUES(file_size), file_size),
+                    upload_bytes=COALESCE(VALUES(upload_bytes), upload_bytes),
+                    upload_total=COALESCE(VALUES(upload_total), upload_total),
+                    upload_percent=COALESCE(VALUES(upload_percent), upload_percent),
+                    telegram_chat_id=COALESCE(VALUES(telegram_chat_id), telegram_chat_id),
+                    telegram_message_id=COALESCE(VALUES(telegram_message_id), telegram_message_id),
+                    telegram_file_id=COALESCE(VALUES(telegram_file_id), telegram_file_id),
+                    error_text=COALESCE(VALUES(error_text), error_text)
+                """,
+                (
+                    program_name,
+                    subject_name,
+                    teacher_name,
+                    topic_name,
+                    sub_topic_name,
+                    lecture_id,
+                    lecture_name,
+                    lecture_url,
+                    thumbnail_url,
+                    thumbnail_mime,
+                    thumbnail_size,
+                    thumbnail_blob,
+                    ia_identifier,
+                    ia_url,
+                    status,
+                    server_id,
+                    file_path,
+                    file_size,
+                    upload_bytes,
+                    upload_total,
+                    upload_percent,
+                    telegram_chat_id,
+                    telegram_message_id,
+                    telegram_file_id,
+                    error,
+                ),
+            )
+    finally:
+        conn.close()
+
+
+def get_khazana_upload_status(program_name, lecture_id, topic_name=None):
+    if not (program_name and lecture_id):
+        return None
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            if topic_name:
+                cur.execute(
+                    """
+                    SELECT
+                        status,
+                        file_path,
+                        file_size,
+                        ia_identifier,
+                        ia_url,
+                        subject_name,
+                        teacher_name,
+                        topic_name,
+                        sub_topic_name,
+                        lecture_name,
+                        updated_at,
+                        created_at
+                    FROM khazana_lecture_uploads
+                    WHERE program_name=%s AND lecture_id=%s AND topic_name=%s
+                    """,
+                    (program_name, lecture_id, topic_name),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT
+                        status,
+                        file_path,
+                        file_size,
+                        ia_identifier,
+                        ia_url,
+                        subject_name,
+                        teacher_name,
+                        topic_name,
+                        sub_topic_name,
+                        lecture_name,
+                        updated_at,
+                        created_at
+                    FROM khazana_lecture_uploads
+                    WHERE program_name=%s AND lecture_id=%s
+                    """,
+                    (program_name, lecture_id),
+                )
+            return cur.fetchone()
+    finally:
+        conn.close()
+
+
+def list_khazana_lectures(
+    program_name=None,
+    status=None,
+    subject_name=None,
+    teacher_name=None,
+    topic_name=None,
+    limit=1000,
+):
+    """Return Khazana lectures in deterministic sequence for queue/retry workflows."""
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            clauses = []
+            params = []
+            if program_name:
+                clauses.append("program_name=%s")
+                params.append(program_name)
+            if status:
+                clauses.append("status=%s")
+                params.append(status)
+            if subject_name:
+                clauses.append("subject_name=%s")
+                params.append(subject_name)
+            if teacher_name:
+                clauses.append("teacher_name=%s")
+                params.append(teacher_name)
+            if topic_name:
+                clauses.append("topic_name=%s")
+                params.append(topic_name)
+
+            where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+            safe_limit = max(1, min(int(limit or 1000), 10000))
+            cur.execute(
+                f"""
+                SELECT
+                    id,
+                    program_name,
+                    subject_name,
+                    teacher_name,
+                    topic_name,
+                    sub_topic_name,
+                    lecture_id,
+                    lecture_name,
+                    lecture_url,
+                    ia_identifier,
+                    ia_url,
+                    status,
+                    file_path,
+                    file_size,
+                    error_text,
+                    created_at,
+                    updated_at
+                FROM khazana_lecture_uploads
+                {where_sql}
+                ORDER BY created_at ASC, id ASC
+                LIMIT {safe_limit}
+                """,
+                tuple(params),
+            )
+            return cur.fetchall() or []
+    finally:
+        conn.close()
+
+
+def has_khazana_thumbnail(program_name, lecture_id, topic_name=None):
+    if not (program_name and lecture_id):
+        return False
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            if topic_name:
+                cur.execute(
+                    """
+                    SELECT thumbnail_blob
+                    FROM khazana_lecture_uploads
+                    WHERE program_name=%s AND lecture_id=%s AND topic_name=%s
+                    """,
+                    (program_name, lecture_id, topic_name),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT thumbnail_blob
+                    FROM khazana_lecture_uploads
+                    WHERE program_name=%s AND lecture_id=%s
+                    """,
+                    (program_name, lecture_id),
+                )
+            row = cur.fetchone()
+            blob = row.get("thumbnail_blob") if row else None
+            return bool(blob)
+    finally:
+        conn.close()
+
+
+def upsert_khazana_asset(
+    program_name,
+    content_id,
+    kind,
+    content_name=None,
+    file_url=None,
+    file_path=None,
+    file_size=None,
+    ia_identifier=None,
+    ia_url=None,
+    status=None,
+    server_id=None,
+    subject_name=None,
+    teacher_name=None,
+    topic_name=None,
+    sub_topic_name=None,
+    error=None,
+):
+    if not (program_name and content_id and kind):
+        return
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO khazana_assets (
+                    program_name,
+                    subject_name,
+                    teacher_name,
+                    topic_name,
+                    sub_topic_name,
+                    content_id,
+                    content_name,
+                    kind,
+                    file_url,
+                    file_path,
+                    file_size,
+                    ia_identifier,
+                    ia_url,
+                    status,
+                    server_id,
+                    error_text
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, COALESCE(%s, 'pending'), %s, %s)
+                ON DUPLICATE KEY UPDATE
+                    subject_name=COALESCE(VALUES(subject_name), subject_name),
+                    teacher_name=COALESCE(VALUES(teacher_name), teacher_name),
+                    topic_name=COALESCE(VALUES(topic_name), topic_name),
+                    sub_topic_name=COALESCE(VALUES(sub_topic_name), sub_topic_name),
+                    content_name=COALESCE(VALUES(content_name), content_name),
+                    file_url=COALESCE(VALUES(file_url), file_url),
+                    file_path=COALESCE(VALUES(file_path), file_path),
+                    file_size=COALESCE(VALUES(file_size), file_size),
+                    ia_identifier=COALESCE(VALUES(ia_identifier), ia_identifier),
+                    ia_url=COALESCE(VALUES(ia_url), ia_url),
+                    status=COALESCE(VALUES(status), status),
+                    server_id=COALESCE(VALUES(server_id), server_id),
+                    error_text=COALESCE(VALUES(error_text), error_text)
+                """,
+                (
+                    program_name,
+                    subject_name,
+                    teacher_name,
+                    topic_name,
+                    sub_topic_name,
+                    content_id,
+                    content_name,
+                    kind,
+                    file_url,
+                    file_path,
+                    file_size,
+                    ia_identifier,
+                    ia_url,
+                    status,
+                    server_id,
+                    error,
+                ),
+            )
+    finally:
+        conn.close()
+
+
+def get_khazana_asset_status(program_name, content_id, kind):
+    if not (program_name and content_id and kind):
+        return None
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT status, file_path, file_size, ia_identifier, ia_url
+                FROM khazana_assets
+                WHERE program_name=%s AND content_id=%s AND kind=%s
+                """,
+                (program_name, content_id, kind),
             )
             return cur.fetchone()
     finally:

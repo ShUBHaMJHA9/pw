@@ -46,28 +46,35 @@ def cookie_splitter(cookie, verbose=False):
 # Key-Pair-Id -> CloudFront-Key-Pair-Id
 
 def get_cookiees_from_url(query_string):
-    # Remove the str before '?' if it exists
-    if "?" in query_string:
-        query_string = query_string.split('?')[1]
+    # Use urllib.parse to robustly parse the query string
+    try:
+        from urllib.parse import urlsplit, parse_qsl
+        # Extract the query part if a full URL was passed
+        if "?" in query_string:
+            query_string = urlsplit(query_string).query
 
-    # Split the query string by '&' to get each key-value pair
-    params = query_string.split('&')
-
-    # Create a dictionary to store the key-value pairs
-    result = {}
-
-    # Map the query string keys to CloudFront-specific names
-    mappings = {
-        'Policy': 'CloudFront-Policy',
-        'Signature': 'CloudFront-Signature',
-        'Key-Pair-Id': 'CloudFront-Key-Pair-Id'
-    }
-
-    # Iterate over the parameters and replace keys as necessary
-    for param in params:
-        key, value = param.split('=')
-        if key in mappings:
-            key = mappings[key]
-        result[key] = value
-
-    return result
+        pairs = parse_qsl(query_string, keep_blank_values=True)
+        result = {}
+        mappings = {
+            'Policy': 'CloudFront-Policy',
+            'Signature': 'CloudFront-Signature',
+            'Key-Pair-Id': 'CloudFront-Key-Pair-Id'
+        }
+        for k, v in pairs:
+            mapped = mappings.get(k, k)
+            result[mapped] = v
+        return result
+    except Exception:
+        # Fallback: be tolerant of malformed query strings
+        result = {}
+        if "?" in query_string:
+            query_string = query_string.split('?', 1)[1]
+        for param in query_string.split('&'):
+            if '=' in param:
+                k, v = param.split('=', 1)
+                if k in ('Policy', 'Signature', 'Key-Pair-Id'):
+                    mapped = {'Policy': 'CloudFront-Policy', 'Signature': 'CloudFront-Signature', 'Key-Pair-Id': 'CloudFront-Key-Pair-Id'}[k]
+                else:
+                    mapped = k
+                result[mapped] = v
+        return result

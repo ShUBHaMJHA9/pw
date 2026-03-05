@@ -83,7 +83,7 @@ def shell(command, filter=None, verbose=False, stdout=subprocess.PIPE, stderr=su
     except Exception as e:
         print(f"Error: {e}")
         if not return_out:
-            return []
+            return 1  # Return error code instead of empty list
         else:
             return -1, []
 

@@ -35,12 +35,14 @@ class Main:
                  batch_name=None,
                  topic_name=None,
                  lecture_url=None,
+                 video_id=None,
                  directory="./",
                  tmpDir="/*auto*/",
                  vsdPath='nm3',
                  ffmpeg="ffmpeg",
                  mp4d="mp4decrypt",
                  tui=True,
+                 tui_instance=None,
                  token=None, random_id=None, verbose=True, suppress_exit=False, progress_callback=None, use_gpu=False):
 
         os2 = SysFunc()
@@ -50,6 +52,7 @@ class Main:
         self.batch_name = batch_name
         self.topic_name = topic_name
         self.lecture_url = lecture_url
+        self.video_id = video_id
         self.directory = directory if directory else "./"
         self.tmpDir = BasicUtils.abspath(tmpDir) if tmpDir != '/*auto*/' else BasicUtils.abspath('./tmp/')
 
@@ -65,6 +68,7 @@ class Main:
         self.ffmpeg = BasicUtils.abspath(ffmpeg) if ffmpeg != 'ffmpeg' else 'ffmpeg'
         self.mp4d = BasicUtils.abspath(mp4d) if mp4d != 'mp4decrypt' else 'mp4decrypt'
         self.tui = tui
+        self.tui_instance = tui_instance
 
         # GPU usage flag: when True, ffmpeg merge/encode operations may use hardware encoders
         self.use_gpu = use_gpu
@@ -92,12 +96,55 @@ class Main:
                 debugger.debug(f"Fetching License Key for Topic Name: {self.topic_name} and Lecture URL: {self.lecture_url}")
             key = fetcher.get_key(
                 id=self.id,batch_name=self.batch_name,khazana_topic_name=self.topic_name,khazana_url=self.lecture_url,
-                verbose=self.verbose)[1]
+                video_id=self.video_id,verbose=self.verbose)[1]
             cookies = fetcher.cookies
         except Exception as e:
             raise TypeError(f"ID is invalid (if the token is valid) ")
 
-        urls = MPDParser(fetcher.url).pre_process().parse().get_segment_urls()
+        urls = MPDParser(fetcher.url, cookies=cookies, verbose=self.verbose).pre_process().parse().get_segment_urls()
+
+        # Quick verification: Test one segment download to ensure signed URLs work
+        debugger.info("Verifying signed URLs...")
+        
+        import requests as test_requests
+        test_passed = True
+        
+        # Test audio segment
+        if urls.get("audio", {}).get("segments"):
+            first_audio_num = min(urls["audio"]["segments"].keys())
+            first_audio_url = urls["audio"]["segments"][first_audio_num]
+            try:
+                resp = test_requests.head(first_audio_url, timeout=10, allow_redirects=True)
+                if resp.status_code == 200:
+                    debugger.success(f"✓ Audio segment {first_audio_num} OK")
+                else:
+                    debugger.error(f"✗ Audio segment HTTP {resp.status_code}")
+                    test_passed = False
+            except Exception as e:
+                debugger.error(f"✗ Audio test failed: {str(e)[:50]}")
+                test_passed = False
+        
+        # Test video segment
+        if urls.get("video", {}).get("segments"):
+            first_video_num = min(urls["video"]["segments"].keys())
+            first_video_url = urls["video"]["segments"][first_video_num]
+            try:
+                resp = test_requests.head(first_video_url, timeout=10, allow_redirects=True)
+                if resp.status_code == 200:
+                    debugger.success(f"✓ Video segment {first_video_num} OK")
+                else:
+                    debugger.error(f"✗ Video segment HTTP {resp.status_code}")
+                    test_passed = False
+            except Exception as e:
+                debugger.error(f"✗ Video test failed: {str(e)[:50]}")
+                test_passed = False
+        
+        if not test_passed:
+            raise RuntimeError("Signature verification failed")
+        
+        audio_count = len(urls.get('audio', {}).get('segments', {}))
+        video_count = len(urls.get('video', {}).get('segments', {}))
+        debugger.info(f"{audio_count} audio + {video_count} video segments")
 
         # 1. Downloading Files (New Download Method using VSD)
 
@@ -118,13 +165,25 @@ class Main:
             max_workers=max_workers,
             audio_dir="audio",
             video_dir="video",
+            request_headers={'Cookie': cookies} if cookies else None,
         )
 
         from tui import update_downloader_v3_with_tui
 
         if self.tui:
-            downloader = update_downloader_v3_with_tui(downloader)
-        results = downloader.download_all(urls)
+            downloader = update_downloader_v3_with_tui(
+                downloader,
+                tui=self.tui_instance,
+                manage_lifecycle=self.tui_instance is None,
+            )
+        
+        try:
+            results = downloader.download_all(urls)
+        except Exception as e:
+            debugger.error(f"Download failed: {str(e)[:80]}")
+            import traceback
+            debugger.error(f"Traceback: {traceback.format_exc()[:300]}")
+            raise
 
 
         for media_type, result in results.items():

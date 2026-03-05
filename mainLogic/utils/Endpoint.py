@@ -85,4 +85,37 @@ class Endpoint:
                 else:
                     raise ValueError('post_function must be callable')
 
+        # Optional verbose request/response logging for diagnostics
+        try:
+            import os, json, time
+            if os.getenv('PWDL_VERBOSE_REQ'):
+                safe_name = str(int(time.time()))
+                fn = f"/tmp/endpoint_log_{safe_name}.json"
+                dump = {
+                    'request': {
+                        'method': self.method,
+                        'url': self.url,
+                        'headers': self.headers,
+                        'payload': self.payload,
+                        'files': list(self.files.keys())
+                    },
+                    'response': {
+                        'status_code': response.status_code,
+                        'headers': dict(response.headers),
+                        'body': None
+                    }
+                }
+                try:
+                    dump['response']['body'] = response_obj
+                except Exception:
+                    dump['response']['body'] = response.text
+
+                try:
+                    with open(fn, 'w') as fh:
+                        fh.write(json.dumps(dump, default=str, indent=2))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
         return response_obj, response.status_code, response

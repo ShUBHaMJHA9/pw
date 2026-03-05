@@ -5,6 +5,7 @@ from mainLogic.utils.process import shell
 from mainLogic.utils.basicUtils import BasicUtils
 from mainLogic import error
 import os
+import shutil
 
 class Decrypt:
     """
@@ -38,9 +39,9 @@ class Decrypt:
             file
         )
 
-        _ = shell(mp4d)
-        if  _ > 1 :
-            debugger.error(f"{mp4d} failed with exit code {_}")
+        # Validate binary path without executing mp4decrypt directly (running it without args prints usage spam).
+        mp4d_exists = os.path.exists(mp4d) if os.path.isabs(mp4d) else bool(shutil.which(mp4d))
+        if not mp4d_exists:
             debugger.error(DependencyNotFound("Mp4decrypt"))
             debugger.error(f'The code supplied {mp4d} does not exist. Please check your spelling and try again.')
 
@@ -59,7 +60,7 @@ class Decrypt:
 
         # the main part where the decryption happens
 
-        code, output_lines = shell(decrypt_command, verbose=True, return_out=True)
+        code, output_lines = shell(decrypt_command, verbose=verbose, return_out=True)
         # mp4decrypt can print usage text even when return code is 0; log it but do not fail
         if any("usage: mp4decrypt" in line.lower() for line in output_lines):
             debugger.warning("mp4decrypt printed usage text; continuing because return code was 0")

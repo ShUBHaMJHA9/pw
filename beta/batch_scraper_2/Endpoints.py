@@ -31,7 +31,7 @@ class Endpoints:
             'accept': 'application/json, text/plain, */*',
             'client-id': '5eb393ee95fab7468a79d189',
             'client-type': 'WEB',
-            'client-version': '4.4.23',
+            'client-version': '201',
             'content-type': 'application/json',
             'origin': 'https://www.pw.live',
             'referer': 'https://www.pw.live/',
@@ -91,25 +91,27 @@ class Endpoints:
                 try:
                     data = response
                     if self.outer.verbose:
-                        debugger.debug(f"Processing response:")
-                        debugger.info(data)
+                        debugger.debug(f"Processing response with keys {keys_to_extract}:")
+                        if isinstance(data, dict):
+                            debugger.info(f"Response keys: {list(data.keys())}")
 
                     if isinstance(data, dict) and data.get("success") is False:
                         error_msg = data.get("error", {}).get("message") or data.get("message") or "Unknown error"
                         debugger.error(f"API request failed: {error_msg}")
                         return []
-                        
+                    
+                    # Extract data using the provided keys
                     for key in keys_to_extract:
                         if isinstance(data, dict) and key in data:
                             data = data[key]
                         else:
-                            raise KeyError(f"Key '{key}' not found at level {key}")
+                            raise KeyError(f"Key '{key}' not found in response. Available keys: {list(data.keys()) if isinstance(data, dict) else 'N/A'}")
 
                     if model_class:
                         if isinstance(data, list):
                             processed_data = [model_class.from_json(item) for item in data]
                             if self.outer.verbose:
-                                debugger.success(f"Successfully extracted and modeled data using {model_class.__name__} (List)")
+                                debugger.success(f"Successfully extracted and modeled data using {model_class.__name__} (List of {len(processed_data)} items)")
                             return processed_data
                         elif isinstance(data, dict):
                             processed_data = model_class.from_json(data)
@@ -125,9 +127,10 @@ class Endpoints:
                             debugger.success(f"Successfully extracted raw data using keys {keys_to_extract}")
                         return data
                 except Exception as e:
-                    raise e
                     debugger.error(f"Failed to extract or model data: {e}")
-                    return []
+                    if not self.outer.verbose:
+                        debugger.debug(f"Response was: {response}")
+                    raise
 
         class Khazana(API):
             def __init__(self, outer):
@@ -148,10 +151,18 @@ class Endpoints:
             def url_chapter(self, program_name: str, subject_name: str, teacher_name: str, topic_name: str, sub_topic_name: str) -> str:
                 return f"{self.base}/{self.v2}/programs/contents?programId={program_name}&subjectId={subject_name}&chapterId={teacher_name}&topicId={topic_name}&subTopicId={sub_topic_name}&page=1&limit={self.hard_limit}"
 
-            def url_lecture(self, program_name: str, topic_name: str, lecture_id: str, lecture_url: str) -> str:
-                return (f"{self.base}/{self.v1}/videos/video-url-details?type=RECORDED&videoContainerType=DASH&reqType"
-                        f"=query&childId={lecture_id}&parentId={program_name}&"
-                        f"videoUrl={lecture_url}&secondaryParentId={topic_name}")
+            def url_lecture(self, program_name: str, topic_name: str, lecture_id: str, lecture_url: str, req_type: str = "cookie", video_id: str = None, client_version: str = "201") -> str:
+                """
+                Build Khazana lecture URL. Adds optional `videoId` and `clientVersion` parameters
+                to match the client requests observed in Burp captures.
+                """
+                safe_url = quote_plus(str(lecture_url)) if lecture_url else ""
+                vid_part = f"&videoId={video_id}" if video_id else ""
+                return (f"{self.base}/{self.v1}/videos/video-url-details"
+                        f"?type=RECORDED&videoContainerType=DASH&reqType={req_type}"
+                        f"&childId={lecture_id}&parentId={program_name}"
+                        f"&videoUrl={safe_url}&secondaryParentId={topic_name}{vid_part}"
+                        f"&clientVersion={client_version}")
 
 
         self.API = API(self)
@@ -191,12 +202,29 @@ class Endpoints:
         }
 
 
-    def set_token(self, token: str, random_id: str = "a3e290fa-ea36-4012-9124-8908794c33aa") -> 'Endpoints':
+    def set_token(self, token: str, random_id: str = "a3e290fa-ea36-4012-9124-8908794c33aa", cookies: str = None) -> 'Endpoints':
+        """
+        Set the Authorization token and optional CloudFront cookie string to include
+        in subsequent Khazana requests.
+
+        Args:
+            token: Bearer token string
+            random_id: Random id used by the client
+            cookies: Optional Cookie header string (e.g. 'CloudFront-Key-Pair-Id=...; CloudFront-Policy=...; CloudFront-Signature=...')
+        """
         self.token = token
         self.DEFAULT_HEADERS.setdefault('Authorization', 'Bearer ' + self.token)
         if random_id:
             self.random_id = random_id
             self.DEFAULT_HEADERS['randomid'] = self.random_id
+        if cookies:
+            # allow callers to provide full cookie string or dict-like
+            if isinstance(cookies, dict):
+                # convert dict to cookie string
+                cookie_str = "; ".join([f"{k}={v}" for k, v in cookies.items()])
+            else:
+                cookie_str = str(cookies)
+            self.DEFAULT_HEADERS['Cookie'] = cookie_str
         if self.verbose:
             debugger.debug("Authorization token set successfully.")
         return self
@@ -227,8 +255,14 @@ class Endpoints:
             with open(f'{type}.log.json','w') as file: file.write(json.dumps(fetched_response))
             debugger.debug(fetched_response)
         
-        model_to_use = lambert.model if use_model else None
-        processed_data = self.API.post_process(fetched_response, lambert.post_process_args, model_to_use)
+        try:
+            model_to_use = lambert.model if use_model else None
+            processed_data = self.API.post_process(fetched_response, lambert.post_process_args, model_to_use)
+        except Exception as e:
+            debugger.error(f"Failed to process response for '{type}': {e}")
+            if self.verbose:
+                debugger.debug(f"Raw response: {fetched_response}")
+            raise
         
         return processed_data
 
