@@ -293,15 +293,175 @@ def ensure_schema():
                 ) ENGINE=InnoDB;
                 """
             )
+            # Rename old khazana_lecture_uploads to khazana_lecture_uploads_old if needed
+            cur.execute("""
+                SELECT COUNT(*) AS cnt FROM INFORMATION_SCHEMA.TABLES
+                WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'khazana_lecture_uploads'
+            """)
+            if cur.fetchone()["cnt"] > 0:
+                cur.execute("""
+                    SELECT COUNT(*) AS cnt FROM INFORMATION_SCHEMA.TABLES
+                    WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'khazana_lecture_uploads_old'
+                """)
+                if cur.fetchone()["cnt"] == 0:
+                    # Only rename if old table doesn't exist yet
+                    _try_execute("RENAME TABLE khazana_lecture_uploads TO khazana_lecture_uploads_old")
+            
+            # Create normalized Khazana tables
             cur.execute(
                 """
-                CREATE TABLE IF NOT EXISTS khazana_assets (
+                CREATE TABLE IF NOT EXISTS khazana_programs (
+                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    program_id VARCHAR(128) NOT NULL,
+                    program_name VARCHAR(255) NOT NULL,
+                    thumbnail_url TEXT NULL,
+                    thumbnail_mime VARCHAR(64) NULL,
+                    thumbnail_size BIGINT NULL,
+                    thumbnail_blob LONGBLOB NULL,
+                    thumbnail_updated_at TIMESTAMP NULL DEFAULT NULL,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE KEY uniq_khazana_program (program_id)
+                ) ENGINE=InnoDB;
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS khazana_subjects (
+                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    subject_name VARCHAR(255) NOT NULL,
+                    subject_slug VARCHAR(255) NULL,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE KEY uniq_khazana_subject_name (subject_name)
+                ) ENGINE=InnoDB;
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS khazana_teachers (
+                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    teacher_name VARCHAR(255) NOT NULL,
+                    teacher_slug VARCHAR(255) NULL,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE KEY uniq_khazana_teacher_name (teacher_name)
+                ) ENGINE=InnoDB;
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS khazana_topics (
+                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    program_id BIGINT NOT NULL,
+                    subject_id BIGINT NULL,
+                    teacher_id BIGINT NULL,
+                    topic_id VARCHAR(128) NOT NULL,
+                    topic_name VARCHAR(255) NULL,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE KEY uniq_khazana_topic (program_id, topic_id),
+                    KEY idx_khazana_topic_subject (subject_id),
+                    KEY idx_khazana_topic_teacher (teacher_id)
+                ) ENGINE=InnoDB;
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS khazana_lectures (
+                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    topic_id BIGINT NOT NULL,
+                    lecture_id VARCHAR(128) NOT NULL,
+                    lecture_name VARCHAR(255) NULL,
+                    lecture_url TEXT NULL,
+                    sub_topic_name VARCHAR(255) NULL,
+                    thumbnail_url TEXT NULL,
+                    thumbnail_mime VARCHAR(64) NULL,
+                    thumbnail_size BIGINT NULL,
+                    thumbnail_blob LONGBLOB NULL,
+                    thumbnail_updated_at TIMESTAMP NULL DEFAULT NULL,
+                    ia_identifier VARCHAR(255) NULL,
+                    ia_url TEXT NULL,
+                    status VARCHAR(32) NOT NULL DEFAULT 'pending',
+                    server_id VARCHAR(128) NULL,
+                    file_path TEXT NULL,
+                    file_size BIGINT NULL,
+                    upload_bytes BIGINT NULL,
+                    upload_total BIGINT NULL,
+                    upload_percent FLOAT NULL,
+                    telegram_chat_id VARCHAR(128) NULL,
+                    telegram_message_id VARCHAR(128) NULL,
+                    telegram_file_id VARCHAR(255) NULL,
+                    error_text TEXT NULL,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE KEY uniq_khazana_lecture (topic_id, lecture_id),
+                    KEY idx_khazana_lecture_ia (ia_identifier),
+                    KEY idx_khazana_lecture_status (status)
+                ) ENGINE=InnoDB;
+                """
+            )
+            
+            # Add foreign key constraints for khazana tables
+            if not _constraint_exists("fk_khazana_topic_program"):
+                _try_execute(
+                    "ALTER TABLE khazana_topics ADD CONSTRAINT fk_khazana_topic_program FOREIGN KEY (program_id) REFERENCES khazana_programs(id) ON DELETE CASCADE"
+                )
+            if not _constraint_exists("fk_khazana_topic_subject"):
+                _try_execute(
+                    "ALTER TABLE khazana_topics ADD CONSTRAINT fk_khazana_topic_subject FOREIGN KEY (subject_id) REFERENCES khazana_subjects(id) ON DELETE SET NULL"
+                )
+            if not _constraint_exists("fk_khazana_topic_teacher"):
+                _try_execute(
+                    "ALTER TABLE khazana_topics ADD CONSTRAINT fk_khazana_topic_teacher FOREIGN KEY (teacher_id) REFERENCES khazana_teachers(id) ON DELETE SET NULL"
+                )
+            if not _constraint_exists("fk_khazana_lecture_topic"):
+                _try_execute(
+                    "ALTER TABLE khazana_lectures ADD CONSTRAINT fk_khazana_lecture_topic FOREIGN KEY (topic_id) REFERENCES khazana_topics(id) ON DELETE CASCADE"
+                )
+            
+            # Keep old khazana_lecture_uploads_old table and assets table for backward compatibility
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS khazana_lecture_uploads_old (
                     id BIGINT AUTO_INCREMENT PRIMARY KEY,
                     program_name VARCHAR(128) NOT NULL,
                     subject_name VARCHAR(128) NULL,
                     teacher_name VARCHAR(255) NULL,
                     topic_name VARCHAR(255) NULL,
                     sub_topic_name VARCHAR(255) NULL,
+                    lecture_id VARCHAR(128) NOT NULL,
+                    lecture_name VARCHAR(255) NULL,
+                    lecture_url TEXT NULL,
+                    thumbnail_url TEXT NULL,
+                    thumbnail_mime VARCHAR(64) NULL,
+                    thumbnail_size BIGINT NULL,
+                    thumbnail_blob LONGBLOB NULL,
+                    thumbnail_updated_at TIMESTAMP NULL DEFAULT NULL,
+                    ia_identifier VARCHAR(255) NULL,
+                    ia_url TEXT NULL,
+                    status VARCHAR(32) NOT NULL DEFAULT 'pending',
+                    server_id VARCHAR(128) NULL,
+                    file_path TEXT NULL,
+                    file_size BIGINT NULL,
+                    upload_bytes BIGINT NULL,
+                    upload_total BIGINT NULL,
+                    upload_percent FLOAT NULL,
+                    telegram_chat_id VARCHAR(128) NULL,
+                    telegram_message_id VARCHAR(128) NULL,
+                    telegram_file_id VARCHAR(255) NULL,
+                    error_text TEXT NULL,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE KEY uniq_khazana_lecture (program_name, lecture_id, topic_name)
+                ) ENGINE=InnoDB;
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS khazana_assets (
+                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    topic_id BIGINT NOT NULL,
                     content_id VARCHAR(128) NOT NULL,
                     content_name VARCHAR(255) NULL,
                     kind VARCHAR(64) NOT NULL,
@@ -315,10 +475,17 @@ def ensure_schema():
                     error_text TEXT NULL,
                     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE KEY uniq_khazana_asset (program_name, content_id, kind)
+                    UNIQUE KEY uniq_khazana_asset (topic_id, content_id, kind),
+                    KEY idx_khazana_asset_ia (ia_identifier),
+                    KEY idx_khazana_asset_status (status)
                 ) ENGINE=InnoDB;
                 """
             )
+            if not _constraint_exists("fk_khazana_asset_topic"):
+                _try_execute(
+                    "ALTER TABLE khazana_assets ADD CONSTRAINT fk_khazana_asset_topic FOREIGN KEY (topic_id) REFERENCES khazana_topics(id) ON DELETE CASCADE"
+                )
+            
             cur.execute(
                 """
                 CREATE TABLE IF NOT EXISTS dpp_backups (
@@ -487,18 +654,18 @@ def ensure_schema():
                 cur.execute("ALTER TABLE lecture_uploads ADD COLUMN ia_url TEXT NULL")
 
             for column_name, ddl in (
-                ("thumbnail_url", "ALTER TABLE khazana_lecture_uploads ADD COLUMN thumbnail_url TEXT NULL"),
-                ("thumbnail_mime", "ALTER TABLE khazana_lecture_uploads ADD COLUMN thumbnail_mime VARCHAR(64) NULL"),
-                ("thumbnail_size", "ALTER TABLE khazana_lecture_uploads ADD COLUMN thumbnail_size BIGINT NULL"),
-                ("thumbnail_blob", "ALTER TABLE khazana_lecture_uploads ADD COLUMN thumbnail_blob LONGBLOB NULL"),
-                ("thumbnail_updated_at", "ALTER TABLE khazana_lecture_uploads ADD COLUMN thumbnail_updated_at TIMESTAMP NULL DEFAULT NULL"),
-                ("ia_identifier", "ALTER TABLE khazana_lecture_uploads ADD COLUMN ia_identifier VARCHAR(255) NULL"),
-                ("ia_url", "ALTER TABLE khazana_lecture_uploads ADD COLUMN ia_url TEXT NULL"),
+                ("thumbnail_url", "ALTER TABLE khazana_lecture_uploads_old ADD COLUMN thumbnail_url TEXT NULL"),
+                ("thumbnail_mime", "ALTER TABLE khazana_lecture_uploads_old ADD COLUMN thumbnail_mime VARCHAR(64) NULL"),
+                ("thumbnail_size", "ALTER TABLE khazana_lecture_uploads_old ADD COLUMN thumbnail_size BIGINT NULL"),
+                ("thumbnail_blob", "ALTER TABLE khazana_lecture_uploads_old ADD COLUMN thumbnail_blob LONGBLOB NULL"),
+                ("thumbnail_updated_at", "ALTER TABLE khazana_lecture_uploads_old ADD COLUMN thumbnail_updated_at TIMESTAMP NULL DEFAULT NULL"),
+                ("ia_identifier", "ALTER TABLE khazana_lecture_uploads_old ADD COLUMN ia_identifier VARCHAR(255) NULL"),
+                ("ia_url", "ALTER TABLE khazana_lecture_uploads_old ADD COLUMN ia_url TEXT NULL"),
             ):
                 cur.execute(
                     """
                     SELECT COUNT(*) AS cnt FROM INFORMATION_SCHEMA.COLUMNS
-                    WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'khazana_lecture_uploads' AND COLUMN_NAME = %s
+                    WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'khazana_lecture_uploads_old' AND COLUMN_NAME = %s
                     """,
                     (column_name,),
                 )

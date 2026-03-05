@@ -1,6 +1,7 @@
 import re
 import base64
 import json
+from urllib.parse import quote_plus
 from beta.batch_scraper_2.Endpoints import Endpoints
 from mainLogic.big4.Ravenclaw_decrypt.heck import get_cookiees_from_url
 from mainLogic.big4.obsolete.Obsolete_Gryffindor_downloadv2 import Download
@@ -43,6 +44,10 @@ class LicenseKeyFetcher:
             if verbose:
                 debugger.debug("Calling Khazana video-url-details endpoint to get signed URL...")
             
+            # Always try to fetch from API first to get fresh signed parameters
+            # (This ensures we get up-to-date CloudFront signed URLs)
+            safe_url = quote_plus(str(khazana_url or ""))
+            
             # Build device capability headers matching the actual working client request
             device_headers = {
                 "Authorization": f"Bearer {self.token}",
@@ -78,88 +83,100 @@ class LicenseKeyFetcher:
                 "Version": "0.0.1",
             }
             
-            # Build the endpoint with all required parameters (reqType=query returns the signature)
-            endpoint_url = (
-                f"https://api.penpencil.co/v1/videos/video-url-details"
-                f"?type=RECORDED&videoContainerType=DASH&reqType=query"
-                f"&childId={id}&parentId={batch_name}"
-                f"&videoUrl={khazana_url}&secondaryParentId={khazana_topic_name}&clientVersion=201"
-            )
+            # Try multiple endpoint variations to handle API changes
+            endpoint_variations = []
             
-            if video_id:
-                endpoint_url += f"&videoId={video_id}"
+            # Variation 1: Standard Khazana (type=RECORDED)
+            for req_type in ["query", "cookie"]:
+                url_v1 = (
+                    f"https://api.penpencil.co/v1/videos/video-url-details"
+                    f"?type=RECORDED&videoContainerType=DASH&reqType={req_type}"
+                    f"&childId={id}&parentId={batch_name}"
+                    f"&videoUrl={safe_url}&secondaryParentId={khazana_topic_name}&clientVersion=201"
+                )
+                if video_id:
+                    url_v1 += f"&videoId={video_id}"
+                endpoint_variations.append(("v1-RECORDED", url_v1))
             
-            if verbose:
-                    debugger.debug(f"Khazana video-url-details endpoint (url truncated for security)")
-                    debugger.debug(f"  type=RECORDED, childId={id}, parentId={batch_name}, secondaryParentId={khazana_topic_name}")
+            # Variation 2: Try BATCHES type (in case content is batch-style)
+            for req_type in ["query"]:
+                url_v2 = (
+                    f"https://api.penpencil.co/v1/videos/video-url-details"
+                    f"?type=BATCHES&videoContainerType=DASH&reqType={req_type}"
+                    f"&childId={id}&parentId={batch_name}"
+                    f"&videoUrl={safe_url}&secondaryParentId={khazana_topic_name}"
+                )
+                if video_id:
+                    url_v2 += f"&videoId={video_id}"
+                endpoint_variations.append(("v1-BATCHES", url_v2))
             
-            endpoint = Endpoint(url=endpoint_url, method='GET', headers=device_headers)
-            response, status_code, resp_obj = endpoint.fetch()
-            
-            if status_code != 200:
-                # If request failed with video_id, try without it
-                if video_id and status_code == 403:
+            last_error = None
+            for variation_name, endpoint_url in endpoint_variations:
+                try:
                     if verbose:
-                        debugger.debug(f"Request with videoId failed (403), retrying without videoId...")
-                    endpoint_url_no_vid = (
-                        f"https://api.penpencil.co/v1/videos/video-url-details"
-                        f"?type=RECORDED&videoContainerType=DASH&reqType=query"
-                        f"&childId={id}&parentId={batch_name}"
-                        f"&videoUrl={khazana_url}&secondaryParentId={khazana_topic_name}"
-                    )
-                    endpoint = Endpoint(url=endpoint_url_no_vid, method='GET', headers=device_headers)
-                    response, status_code, resp_obj = endpoint.fetch()
-                
-                # If still failing, try reqType=cookie as fallback
-                if status_code != 200:
-                    if verbose:
-                        debugger.debug(f"Request with reqType=query failed, trying reqType=cookie...")
-                    endpoint_url_cookie = (
-                        f"https://api.penpencil.co/v1/videos/video-url-details"
-                        f"?type=RECORDED&videoContainerType=DASH&reqType=cookie"
-                        f"&childId={id}&parentId={batch_name}"
-                        f"&videoUrl={khazana_url}&secondaryParentId={khazana_topic_name}"
-                    )
-                    if video_id:
-                        endpoint_url_cookie += f"&videoId={video_id}"
-                    endpoint = Endpoint(url=endpoint_url_cookie, method='GET', headers=device_headers)
+                        debugger.debug(f"Trying endpoint variation: {variation_name}")
+                    
+                    endpoint = Endpoint(url=endpoint_url, method='GET', headers=device_headers)
                     response, status_code, resp_obj = endpoint.fetch()
                     
-                if status_code != 200:
-                    if verbose:
-                        debugger.error(f"Failed to fetch signed URL. Status: {status_code}")
-                        if isinstance(response, dict):
-                            debugger.error(f"Response: {response}")
-                    return None
-            
-            if isinstance(response, dict) and response.get('success') and 'data' in response:
-                signed_data = response.get('data', {})
-                if verbose:
-                    debugger.debug(f"API response data keys: {list(signed_data.keys())}")
-
-                # Extract base URL and signed query string (standard Khazana response format)
-                base_url = signed_data.get('url')
-                signed_query = signed_data.get('signedUrl', '')
-                
-                if base_url and signed_query:
-                    # Combine base URL with signed query parameters
-                    full_signed_url = f"{base_url}{signed_query}"
-                    if verbose:
-                        debugger.success(f"Combined URL from base + signedUrl query string")
-                    return full_signed_url
-                
-                # Fallback: try other possible response keys for signed URL
-                for key in ['signedUrl', 'url', 'masterUrl', 'playUrl', 'videoUrl']:
-                    url_candidate = signed_data.get(key)
-                    if url_candidate and isinstance(url_candidate, str):
+                    if status_code != 200:
+                        last_error = Exception(f"{variation_name}: Status {status_code}")
                         if verbose:
-                            debugger.success(f"Got signed URL from '{key}' field")
-                        return url_candidate
+                            debugger.debug(f"  {variation_name} failed: {status_code}")
+                        continue
+                    
+                    # If successful, process response
+                    if isinstance(response, dict) and response.get('success') and 'data' in response:
+                        signed_data = response.get('data', {})
+                        if verbose:
+                            debugger.debug(f"API response data keys: {list(signed_data.keys())}")
 
+                        # Extract base URL and signed query string
+                        base_url = signed_data.get('url')
+                        signed_query = signed_data.get('signedUrl', '')
+                        
+                        if base_url and signed_query:
+                            full_signed_url = f"{base_url}{signed_query}"
+                            if verbose:
+                                debugger.success(f"✓ Got signed URL from {variation_name}")
+                            self.url = full_signed_url
+                            return full_signed_url
+                        
+                        # Try fallback keys
+                        for key in ['signedUrl', 'url', 'masterUrl', 'playUrl', 'videoUrl']:
+                            url_candidate = signed_data.get(key)
+                            if url_candidate and isinstance(url_candidate, str):
+                                if verbose:
+                                    debugger.success(f"✓ Got signed URL from {variation_name}['{key}']")
+                                self.url = url_candidate
+                                return url_candidate
+                        
+                        if verbose:
+                            debugger.error(f"No URL fields in {variation_name} response")
+                        
+                except Exception as e:
+                    last_error = e
+                    if verbose:
+                        debugger.debug(f"  {variation_name} exception: {e}")
+                    continue
+            
+            # If all variations failed, try fallback to provided khazana_url if it's a CloudFront URL
+            if verbose:
+                debugger.error(f"All endpoint variations failed. Last error: {last_error}")
+                if last_error and "403" in str(last_error):
+                    debugger.error("Authentication issue (403) - this may indicate:")
+                    debugger.error("  - Token is invalid or expired")
+                    debugger.error("  - API permissions have changed")
+                    debugger.error("  - Content is not available for this user")
+            
+            # Last resort: if khazana_url is a CloudFront URL, use it directly as fallback
+            if khazana_url and "cloudfront.net" in str(khazana_url):
                 if verbose:
-                    response_str = json.dumps(response, indent=2)[:500] if isinstance(response, dict) else str(response)[:500]
-                    debugger.error(f"Unexpected response format or missing data:\n{response_str}")
-                return None
+                    debugger.debug(f"Falling back to provided CloudFront URL")
+                self.url = khazana_url
+                return khazana_url
+            
+            return None
             
         except Exception as e:
             if verbose:
@@ -227,48 +244,92 @@ class LicenseKeyFetcher:
         return result
 
     def extract_kid_from_mpd(self, url):
-        # Extract CloudFront cookies/signature from the URL if present
-        headers = {
+        import time
+        base_headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             "Accept": "application/dash+xml",
             "Referer": "https://www.pw.live/",
             "Origin": "https://www.pw.live",
         }
-        
-        # Add authorization token if token is available
+
+        attempts = []
+
+        # 1) Full headers (token + cookies) for API/CDN combinations that require both.
+        h1 = dict(base_headers)
         if self.token:
-            headers["Authorization"] = f"Bearer {self.token}"
-        
-        # Add CloudFront cookies if we have them
+            h1["Authorization"] = f"Bearer {self.token}"
         if self.cookies:
-            headers["Cookie"] = self.cookies
+            h1["Cookie"] = self.cookies
+        attempts.append(("Bearer Token + Cookies", h1))
+
+        # 2) Cookie-only for signed CloudFront URLs where auth header can hurt.
+        h2 = dict(base_headers)
+        if self.cookies:
+            h2["Cookie"] = self.cookies
+        attempts.append(("Cookies Only", h2))
+
+        # 3) Bare request for URLs with fully embedded signature params.
+        attempts.append(("No Auth", base_headers.copy()))
+
+        last_error = None
+        err403_attempts = 0
         
-        # Try with these headers first
-        try:
-            endpoint = Endpoint(url=url, method='GET', headers=headers)
-            response, status_code, _ = endpoint.fetch()
-            if status_code != 200:
-                raise Exception(f"Failed to fetch MPD content. Status code: {status_code}")
-            mpd_content = response
-            pattern = r'default_KID="([0-9a-fA-F-]+)"'
-            match = re.search(pattern, mpd_content)
-            return match.group(1) if match else None
-        except Exception as e:
-            # If it fails with auth headers, try without them (in case CloudFront URL has signature embedded)
+        for attempt_name, headers in attempts:
             try:
-                endpoint = Endpoint(url=url, method='GET')
+                endpoint = Endpoint(url=url, method='GET', headers=headers)
                 response, status_code, _ = endpoint.fetch()
+                
+                if status_code == 403:
+                    # Track 403 errors for diagnosis
+                    err403_attempts += 1
+                    last_error = Exception(f"Failed to fetch MPD content. Status code: 403 ({attempt_name})")
+                    
+                    # For 403 errors, add a small delay before retry
+                    # CloudFront signed URLs may have timing issues
+                    if err403_attempts == 1 and len(attempts) > 1:
+                        time.sleep(1)
+                    continue
+                    
                 if status_code != 200:
-                    raise Exception(f"Failed to fetch MPD content. Status code: {status_code}")
+                    last_error = Exception(f"Failed to fetch MPD content. Status code: {status_code} ({attempt_name})")
+                    continue
+                    
                 mpd_content = response
                 pattern = r'default_KID="([0-9a-fA-F-]+)"'
                 match = re.search(pattern, mpd_content)
                 return match.group(1) if match else None
-            except Exception:
-                raise e
+                
+            except Exception as e:
+                last_error = e
+                continue
+
+        # If all attempts failed, provide diagnostic info
+        if err403_attempts > 0:
+            raise Exception(f"Failed to fetch MPD content: 403 Forbidden on all attempts. This may indicate: token expiration, invalid signed URL, or CloudFront access denial. Check token validity.")
+        
+        raise last_error or Exception("Failed to fetch MPD content")
+
+    def _cookie_str_to_dict(self, cookie_str):
+        out = {}
+        if not cookie_str:
+            return out
+        for part in str(cookie_str).split(";"):
+            seg = part.strip()
+            if not seg or "=" not in seg:
+                continue
+            k, v = seg.split("=", 1)
+            if k and v:
+                out[k.strip()] = v.strip()
+        return out
 
     def set_cookies(self, url):
-        self.cookies = cookies_dict_to_str(get_cookiees_from_url(url))
+        # Preserve previously loaded CloudFront cookies if URL has no cookie params.
+        extracted = cookies_dict_to_str(get_cookiees_from_url(url))
+        if not extracted:
+            return
+        existing = self._cookie_str_to_dict(self.cookies)
+        existing.update(self._cookie_str_to_dict(extracted))
+        self.cookies = "; ".join([f"{k}={v}" for k, v in existing.items()])
 
     def get_key(self, id, batch_name,khazana_topic_name=None,khazana_url=None,video_id=None, verbose=True):
         if verbose: Global.hr()
@@ -307,7 +368,9 @@ class LicenseKeyFetcher:
                     if verbose: debugger.debug("Extracting the KID from the provided MPD file...")
                     kid = self.extract_kid_from_mpd(self.url)
                     if not kid:
-                        raise Exception("KID not found in MPD")
+                        if verbose:
+                            debugger.warning("No KID found in MPD; treating stream as non-DRM.")
+                        return (None, None, self.url)
                     kid = kid.replace("-", "")
                     if verbose: debugger.success(f"KID: {kid}")
 
@@ -338,15 +401,9 @@ class LicenseKeyFetcher:
                     batch_name=batch_name,
                 )
             else:
-                # For Khazana content, the URLs are already pre-signed in the chapter response
-                # Skip the video-url-details endpoint call (it returns 403 for Khazana RECORDED type)
-                if verbose:
-                    debugger.debug(f"Khazana content detected: using pre-signed CloudFront URL directly")
-                    debugger.debug(f"  lectureId={id}")
-                    debugger.debug(f"  videoUrl={khazana_url[:80]}..." if len(khazana_url or '') > 80 else f"  videoUrl={khazana_url}")
-                
-                # Return the provided khazana_url as-is (it's already signed by CloudFront)
-                url_op = {"url": khazana_url, "signedUrl": ""}
+                # Keep Khazana fallback simple: use chapter/signed URL path and avoid extra
+                # lecture endpoint calls that may fail with Unauthorized for some tokens.
+                url_op = {"url": self.url or khazana_url, "signedUrl": ""}
             if not isinstance(url_op, dict):
                 if verbose:
                     debugger.error(f"Failed to fetch lecture URL. Response type: {type(url_op)}")
@@ -406,7 +463,15 @@ class LicenseKeyFetcher:
                 debugger.success(f"Cookies: {self.cookies}")
 
             if verbose: debugger.debug("Extracting the KID from the MPD file...")
-            kid = self.extract_kid_from_mpd(url).replace("-", "")
+            kid_raw = self.extract_kid_from_mpd(url)
+            if not kid_raw:
+                if verbose:
+                    debugger.warning("No KID found in MPD; treating stream as non-DRM.")
+                if verbose:
+                    Global.hr()
+                return (None, None, url)
+
+            kid = kid_raw.replace("-", "")
             if verbose: debugger.success(f"KID: {kid}")
 
             if verbose: debugger.debug("Encrypting the KID to get the key...")

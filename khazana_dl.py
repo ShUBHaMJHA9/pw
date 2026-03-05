@@ -626,6 +626,7 @@ def _download_lecture(
     topic_name=None,
     sub_topic_name=None,
     video_id=None,
+    secondary_parent_id=None,
 ):
     tui, log_sink = _start_task_tui(f"Preparing lecture: {lecture_name or lecture_id}")
     if not lecture_id or not lecture_url:
@@ -698,7 +699,11 @@ def _download_lecture(
         # The Main class will call get_key() which calls get_video_signed_url() to get fresh signed URL from API
         # Don't pre-validate with HEAD request as it may fail but get_key() will refresh it
 
-        batch_name = parent_id or program_name
+        # For Khazana lectures, parentId in API should be program_name, not extracted parent_id
+        # The extracted parent_id from item may be incorrect/outdated
+        batch_name = program_name  # Always use program_name for Khazana
+        effective_secondary_parent = secondary_parent_id or topic_id
+        
         if tui:
             tui.set_status("Downloading media")
         
@@ -713,7 +718,7 @@ def _download_lecture(
             id=lecture_id,
             name=lecture_name or lecture_id,
             batch_name=batch_name,
-            topic_id=topic_id,
+            topic_name=effective_secondary_parent,
             lecture_url=lecture_url,
             video_id=video_id,
             directory=base_dir,
@@ -984,7 +989,7 @@ def _download_asset(
                 id=content_id,
                 name=safe_name,
                 batch_name=program_name,
-                topic_id=topic_id,
+                topic_name=topic_name,
                 lecture_url=file_url,
                 directory=asset_dir,
                 token=token,
@@ -1381,6 +1386,7 @@ def main():
                                 topic_name=topic_label,
                                 sub_topic_name=sub_topic_label,
                                 video_id=video_id,
+                                secondary_parent_id=subject_id,
                             )
 
                     if assets:

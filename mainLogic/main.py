@@ -94,9 +94,12 @@ class Main:
             if self.verbose: debugger.debug(f"Fetching License Key for ID: {self.id} and Batch Name: {self.batch_name}")
             if self.verbose and self.topic_name:
                 debugger.debug(f"Fetching License Key for Topic Name: {self.topic_name} and Lecture URL: {self.lecture_url}")
-            key = fetcher.get_key(
+            key_result = fetcher.get_key(
                 id=self.id,batch_name=self.batch_name,khazana_topic_name=self.topic_name,khazana_url=self.lecture_url,
-                video_id=self.video_id,verbose=self.verbose)[1]
+                video_id=self.video_id,verbose=self.verbose)
+            if not key_result:
+                raise TypeError("Failed to fetch video URL/key")
+            key = key_result[1]
             cookies = fetcher.cookies
         except Exception as e:
             raise TypeError(f"ID is invalid (if the token is valid) ")
@@ -207,22 +210,35 @@ class Main:
 
         # 2. Decrypting Files
 
-        debugger.success("Please wait while we Ravenclaw_decrypt the files...")
+        if key:
+            debugger.success("Please wait while we Ravenclaw_decrypt the files...")
 
-        decrypt = Decrypt()
+            decrypt = Decrypt()
 
-        decrypted_audio = decrypt.decryptAudio(
-            results["audio"].segments_dir,
-            f'{self.name}-Audio-enc',
-            key, mp4d=self.mp4d, outfile=self.name,outdir=self.directory,
-            verbose=self.verbose, suppress_exit=self.suppress_exit)
+            decrypted_audio = decrypt.decryptAudio(
+                results["audio"].segments_dir,
+                f'{self.name}-Audio-enc',
+                key, mp4d=self.mp4d, outfile=self.name,outdir=self.directory,
+                verbose=self.verbose, suppress_exit=self.suppress_exit)
 
-
-        decrypted_video = decrypt.decryptVideo(
-            results["video"].segments_dir,
-            f'{self.name}-Video-enc',
-            key, mp4d=self.mp4d, outfile=self.name,outdir=self.directory,
-            verbose=self.verbose, suppress_exit=self.suppress_exit)
+            decrypted_video = decrypt.decryptVideo(
+                results["video"].segments_dir,
+                f'{self.name}-Video-enc',
+                key, mp4d=self.mp4d, outfile=self.name,outdir=self.directory,
+                verbose=self.verbose, suppress_exit=self.suppress_exit)
+        else:
+            # Non-DRM streams do not require license key decryption.
+            if self.verbose:
+                debugger.warning("No decryption key available; treating media as non-DRM.")
+            decrypted_audio = results["audio"].encoded_file
+            decrypted_video = results["video"].encoded_file
+            import shutil
+            audio_out = f"{self.directory}/{self.name}-Audio.mp4"
+            video_out = f"{self.directory}/{self.name}-Video.mp4"
+            shutil.copy2(decrypted_audio, audio_out)
+            shutil.copy2(decrypted_video, video_out)
+            decrypted_audio = audio_out
+            decrypted_video = video_out
 
         # Call the progress callback for decryption completion
         # if self.progress_callback:
