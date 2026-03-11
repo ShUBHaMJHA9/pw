@@ -507,6 +507,119 @@ def ensure_schema():
                 ) ENGINE=InnoDB;
                 """
             )
+            # Professional test management structure
+            # Main tests table: batch_id + test_id as compound key (like lectures)
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS tests (
+                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    batch_id VARCHAR(128) NOT NULL,
+                    test_id VARCHAR(128) NOT NULL,
+                    test_name VARCHAR(255) NULL,
+                    test_type VARCHAR(64) NULL,
+                    test_template VARCHAR(64) NULL,
+                    language_code VARCHAR(32) NULL,
+                    sections_json JSON NULL,
+                    difficulty_levels_json JSON NULL,
+                    source_url TEXT NULL,
+                    thumbnail_url TEXT NULL,
+                    thumbnail_mime VARCHAR(64) NULL,
+                    thumbnail_size BIGINT NULL,
+                    thumbnail_blob LONGBLOB NULL,
+                    thumbnail_updated_at TIMESTAMP NULL DEFAULT NULL,
+                    ia_identifier VARCHAR(255) NULL,
+                    ia_url TEXT NULL,
+                    status VARCHAR(32) NOT NULL DEFAULT 'pending',
+                    error_text TEXT NULL,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE KEY uniq_test (batch_id, test_id),
+                    KEY idx_test_status (status),
+                    KEY idx_test_batch (batch_id),
+                    KEY idx_test_ia (ia_identifier)
+                ) ENGINE=InnoDB;
+                """
+            )
+            # Questions: child table linked to tests
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS test_questions (
+                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    batch_id VARCHAR(128) NOT NULL,
+                    test_id VARCHAR(128) NOT NULL,
+                    question_id VARCHAR(128) NOT NULL,
+                    question_number INT NULL,
+                    question_type VARCHAR(64) NULL,
+                    positive_marks DECIMAL(10,4) NULL,
+                    negative_marks DECIMAL(10,4) NULL,
+                    difficulty_level INT NULL,
+                    section_id VARCHAR(128) NULL,
+                    subject_id VARCHAR(128) NULL,
+                    chapter_id VARCHAR(128) NULL,
+                    topic_id VARCHAR(128) NULL,
+                    sub_topic_id VARCHAR(128) NULL,
+                    qbg_id VARCHAR(128) NULL,
+                    qbg_subject_id VARCHAR(128) NULL,
+                    qbg_chapter_id VARCHAR(128) NULL,
+                    qbg_topic_id VARCHAR(128) NULL,
+                    correct_option_ids_json JSON NULL,
+                    correct_answer_text TEXT NULL,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE KEY uniq_question (batch_id, test_id, question_id),
+                    KEY idx_question_number (test_id, question_number)
+                ) ENGINE=InnoDB;
+                """
+            )
+            # Question options: child table linked to questions
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS test_options (
+                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    batch_id VARCHAR(128) NOT NULL,
+                    test_id VARCHAR(128) NOT NULL,
+                    question_id VARCHAR(128) NOT NULL,
+                    option_id VARCHAR(128) NOT NULL,
+                    option_text TEXT NULL,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE KEY uniq_option (batch_id, test_id, question_id, option_id),
+                    KEY idx_option_question (test_id, question_id)
+                ) ENGINE=InnoDB;
+                """
+            )
+            # Test assets: images and videos for questions/solutions
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS test_assets (
+                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    batch_id VARCHAR(128) NOT NULL,
+                    test_id VARCHAR(128) NOT NULL,
+                    question_id VARCHAR(128) NULL,
+                    asset_kind VARCHAR(64) NOT NULL,
+                    asset_type VARCHAR(32) NULL,
+                    source_url TEXT NULL,
+                    source_key VARCHAR(255) NULL,
+                    file_path TEXT NULL,
+                    file_size BIGINT NULL,
+                    file_mime VARCHAR(64) NULL,
+                    storage_provider VARCHAR(64) NULL,
+                    storage_id VARCHAR(255) NULL,
+                    storage_url TEXT NULL,
+                    ia_identifier VARCHAR(255) NULL,
+                    ia_url TEXT NULL,
+                    youtube_id VARCHAR(64) NULL,
+                    status VARCHAR(32) NOT NULL DEFAULT 'pending',
+                    error_text TEXT NULL,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE KEY uniq_asset (batch_id, test_id, question_id, asset_kind, source_key),
+                    KEY idx_asset_ia (ia_identifier),
+                    KEY idx_asset_status (status),
+                    KEY idx_asset_question (test_id, question_id)
+                ) ENGINE=InnoDB;
+                """
+            )
             cur.execute(
                 """
                 CREATE TABLE IF NOT EXISTS backup_id (
@@ -686,6 +799,57 @@ def ensure_schema():
                 )
                 if cur.fetchone()["cnt"] == 0:
                     cur.execute(ddl)
+
+            for table_name, additions in (
+                (
+                    "test_series",
+                    (
+                        ("source_url", "ALTER TABLE test_series ADD COLUMN source_url TEXT NULL"),
+                        ("language_code", "ALTER TABLE test_series ADD COLUMN language_code VARCHAR(32) NULL"),
+                        ("sections_json", "ALTER TABLE test_series ADD COLUMN sections_json JSON NULL"),
+                        ("difficulty_levels_json", "ALTER TABLE test_series ADD COLUMN difficulty_levels_json JSON NULL"),
+                        ("status", "ALTER TABLE test_series ADD COLUMN status VARCHAR(32) NOT NULL DEFAULT 'pending'"),
+                        ("error_text", "ALTER TABLE test_series ADD COLUMN error_text TEXT NULL"),
+                    ),
+                ),
+                (
+                    "test_series_batch_links",
+                    (
+                        ("batch_slug", "ALTER TABLE test_series_batch_links ADD COLUMN batch_slug VARCHAR(128) NULL"),
+                        ("batch_name", "ALTER TABLE test_series_batch_links ADD COLUMN batch_name VARCHAR(255) NULL"),
+                        ("test_mapping_id", "ALTER TABLE test_series_batch_links ADD COLUMN test_mapping_id VARCHAR(128) NULL"),
+                        ("status", "ALTER TABLE test_series_batch_links ADD COLUMN status VARCHAR(32) NOT NULL DEFAULT 'pending'"),
+                        ("error_text", "ALTER TABLE test_series_batch_links ADD COLUMN error_text TEXT NULL"),
+                    ),
+                ),
+                (
+                    "test_series_questions",
+                    (
+                        ("question_image_source_url", "ALTER TABLE test_series_questions ADD COLUMN question_image_source_url TEXT NULL"),
+                        ("question_image_storage_provider", "ALTER TABLE test_series_questions ADD COLUMN question_image_storage_provider VARCHAR(64) NULL"),
+                        ("question_image_storage_id", "ALTER TABLE test_series_questions ADD COLUMN question_image_storage_id VARCHAR(255) NULL"),
+                        ("question_image_storage_url", "ALTER TABLE test_series_questions ADD COLUMN question_image_storage_url TEXT NULL"),
+                        ("correct_option_ids_json", "ALTER TABLE test_series_questions ADD COLUMN correct_option_ids_json JSON NULL"),
+                        ("correct_answer_text", "ALTER TABLE test_series_questions ADD COLUMN correct_answer_text TEXT NULL"),
+                    ),
+                ),
+                (
+                    "test_series_solution_assets",
+                    (
+                        ("youtube_id", "ALTER TABLE test_series_solution_assets ADD COLUMN youtube_id VARCHAR(64) NULL"),
+                    ),
+                ),
+            ):
+                for column_name, ddl in additions:
+                    cur.execute(
+                        """
+                        SELECT COUNT(*) AS cnt FROM INFORMATION_SCHEMA.COLUMNS
+                        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s AND COLUMN_NAME = %s
+                        """,
+                        (table_name, column_name),
+                    )
+                    if cur.fetchone()["cnt"] == 0:
+                        _try_execute(ddl)
 
             _try_execute(
                 "CREATE INDEX idx_lecture_subject ON lectures (subject_id)"
@@ -1944,6 +2108,11 @@ def get_or_create_khazana_teacher(teacher_name):
     """
     if not teacher_name:
         return None
+
+    teacher_name = str(teacher_name).strip()
+    # Ignore generic chapter labels like "C Programming by".
+    if not teacher_name or teacher_name.lower().endswith(" by"):
+        return None
     
     teacher_slug = _make_slug(teacher_name)
     conn = _connect()
@@ -2288,5 +2457,331 @@ def has_khazana_thumbnail_v2(program_name, topic_id, lecture_id):
                   AND l.thumbnail_blob IS NOT NULL
             """, (program_name, topic_id, lecture_id))
             return bool(cur.fetchone())
+    finally:
+        conn.close()
+
+# ============================================================================
+# Test Series Schema Functions
+# ============================================================================
+
+
+def upsert_test(
+    batch_id,
+    test_id,
+    test_name=None,
+    test_type=None,
+    test_template=None,
+    language_code=None,
+    sections_json=None,
+    difficulty_levels_json=None,
+    source_url=None,
+    status=None,
+    error=None,
+):
+    """Upsert test record with batch_id + test_id as compound key"""
+    if not (batch_id and test_id):
+        return
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO tests (
+                    batch_id,
+                    test_id,
+                    test_name,
+                    test_type,
+                    test_template,
+                    language_code,
+                    sections_json,
+                    difficulty_levels_json,
+                    source_url,
+                    status,
+                    error_text
+                )
+                VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, COALESCE(%s, 'pending'), %s
+                )
+                ON DUPLICATE KEY UPDATE
+                    test_name=COALESCE(VALUES(test_name), test_name),
+                    test_type=COALESCE(VALUES(test_type), test_type),
+                    test_template=COALESCE(VALUES(test_template), test_template),
+                    language_code=COALESCE(VALUES(language_code), language_code),
+                    sections_json=COALESCE(VALUES(sections_json), sections_json),
+                    difficulty_levels_json=COALESCE(VALUES(difficulty_levels_json), difficulty_levels_json),
+                    source_url=COALESCE(VALUES(source_url), source_url),
+                    status=COALESCE(VALUES(status), status),
+                    error_text=COALESCE(VALUES(error_text), error_text)
+                """,
+                (
+                    batch_id,
+                    test_id,
+                    test_name,
+                    test_type,
+                    test_template,
+                    language_code,
+                    sections_json,
+                    difficulty_levels_json,
+                    source_url,
+                    status,
+                    error,
+                ),
+            )
+    finally:
+        conn.close()
+
+
+def get_test(batch_id, test_id):
+    """Check if test exists; returns status for skipping if already processed"""
+    if not (batch_id and test_id):
+        return None
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, status, error_text
+                FROM tests
+                WHERE batch_id=%s AND test_id=%s
+                """,
+                (batch_id, test_id),
+            )
+            return cur.fetchone()
+    finally:
+        conn.close()
+
+
+def upsert_test_question(
+    batch_id,
+    test_id,
+    question_id,
+    question_number=None,
+    question_type=None,
+    positive_marks=None,
+    negative_marks=None,
+    difficulty_level=None,
+    section_id=None,
+    subject_id=None,
+    chapter_id=None,
+    topic_id=None,
+    sub_topic_id=None,
+    qbg_id=None,
+    qbg_subject_id=None,
+    qbg_chapter_id=None,
+    qbg_topic_id=None,
+    correct_option_ids_json=None,
+    correct_answer_text=None,
+):
+    """Upsert question record with batch_id + test_id + question_id as compound key"""
+    if not (batch_id and test_id and question_id):
+        return
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO test_questions (
+                    batch_id,
+                    test_id,
+                    question_id,
+                    question_number,
+                    question_type,
+                    positive_marks,
+                    negative_marks,
+                    difficulty_level,
+                    section_id,
+                    subject_id,
+                    chapter_id,
+                    topic_id,
+                    sub_topic_id,
+                    qbg_id,
+                    qbg_subject_id,
+                    qbg_chapter_id,
+                    qbg_topic_id,
+                    correct_option_ids_json,
+                    correct_answer_text
+                )
+                VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                )
+                ON DUPLICATE KEY UPDATE
+                    question_number=COALESCE(VALUES(question_number), question_number),
+                    question_type=COALESCE(VALUES(question_type), question_type),
+                    positive_marks=COALESCE(VALUES(positive_marks), positive_marks),
+                    negative_marks=COALESCE(VALUES(negative_marks), negative_marks),
+                    difficulty_level=COALESCE(VALUES(difficulty_level), difficulty_level),
+                    section_id=COALESCE(VALUES(section_id), section_id),
+                    subject_id=COALESCE(VALUES(subject_id), subject_id),
+                    chapter_id=COALESCE(VALUES(chapter_id), chapter_id),
+                    topic_id=COALESCE(VALUES(topic_id), topic_id),
+                    sub_topic_id=COALESCE(VALUES(sub_topic_id), sub_topic_id),
+                    qbg_id=COALESCE(VALUES(qbg_id), qbg_id),
+                    qbg_subject_id=COALESCE(VALUES(qbg_subject_id), qbg_subject_id),
+                    qbg_chapter_id=COALESCE(VALUES(qbg_chapter_id), qbg_chapter_id),
+                    qbg_topic_id=COALESCE(VALUES(qbg_topic_id), qbg_topic_id),
+                    correct_option_ids_json=COALESCE(VALUES(correct_option_ids_json), correct_option_ids_json),
+                    correct_answer_text=COALESCE(VALUES(correct_answer_text), correct_answer_text)
+                """,
+                (
+                    batch_id,
+                    test_id,
+                    question_id,
+                    question_number,
+                    question_type,
+                    positive_marks,
+                    negative_marks,
+                    difficulty_level,
+                    section_id,
+                    subject_id,
+                    chapter_id,
+                    topic_id,
+                    sub_topic_id,
+                    qbg_id,
+                    qbg_subject_id,
+                    qbg_chapter_id,
+                    qbg_topic_id,
+                    correct_option_ids_json,
+                    correct_answer_text,
+                ),
+            )
+    finally:
+        conn.close()
+
+
+def upsert_test_option(batch_id, test_id, question_id, option_id, option_text=None):
+    """Upsert option with batch_id + test_id + question_id + option_id as compound key"""
+    if not (batch_id and test_id and question_id and option_id):
+        return
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO test_options (
+                    batch_id,
+                    test_id,
+                    question_id,
+                    option_id,
+                    option_text
+                )
+                VALUES (%s, %s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                    option_text=COALESCE(VALUES(option_text), option_text)
+                """,
+                (batch_id, test_id, question_id, option_id, option_text),
+            )
+    finally:
+        conn.close()
+
+
+def upsert_test_asset(
+    batch_id,
+    test_id,
+    question_id,
+    asset_kind,
+    source_key,
+    source_url=None,
+    asset_type=None,
+    file_path=None,
+    file_size=None,
+    file_mime=None,
+    storage_provider=None,
+    storage_id=None,
+    storage_url=None,
+    ia_identifier=None,
+    ia_url=None,
+    youtube_id=None,
+    status=None,
+    error=None,
+):
+    """Upsert test asset (image/video) with compound key: batch_id + test_id + question_id + asset_kind + source_key"""
+    if not (batch_id and test_id and question_id and asset_kind and source_key):
+        return
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO test_assets (
+                    batch_id,
+                    test_id,
+                    question_id,
+                    asset_kind,
+                    source_key,
+                    source_url,
+                    asset_type,
+                    file_path,
+                    file_size,
+                    file_mime,
+                    storage_provider,
+                    storage_id,
+                    storage_url,
+                    ia_identifier,
+                    ia_url,
+                    youtube_id,
+                    status,
+                    error_text
+                )
+                VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, COALESCE(%s, 'pending'), %s
+                )
+                ON DUPLICATE KEY UPDATE
+                    source_url=COALESCE(VALUES(source_url), source_url),
+                    asset_type=COALESCE(VALUES(asset_type), asset_type),
+                    file_path=COALESCE(VALUES(file_path), file_path),
+                    file_size=COALESCE(VALUES(file_size), file_size),
+                    file_mime=COALESCE(VALUES(file_mime), file_mime),
+                    storage_provider=COALESCE(VALUES(storage_provider), storage_provider),
+                    storage_id=COALESCE(VALUES(storage_id), storage_id),
+                    storage_url=COALESCE(VALUES(storage_url), storage_url),
+                    ia_identifier=COALESCE(VALUES(ia_identifier), ia_identifier),
+                    ia_url=COALESCE(VALUES(ia_url), ia_url),
+                    youtube_id=COALESCE(VALUES(youtube_id), youtube_id),
+                    status=COALESCE(VALUES(status), status),
+                    error_text=COALESCE(VALUES(error_text), error_text)
+                """,
+                (
+                    batch_id,
+                    test_id,
+                    question_id,
+                    asset_kind,
+                    source_key,
+                    source_url,
+                    asset_type,
+                    file_path,
+                    file_size,
+                    file_mime,
+                    storage_provider,
+                    storage_id,
+                    storage_url,
+                    ia_identifier,
+                    ia_url,
+                    youtube_id,
+                    status,
+                    error,
+                ),
+            )
+    finally:
+        conn.close()
+
+
+def get_test_asset_by_source(batch_id, test_id, asset_kind, source_key):
+    """Get asset record by source_key for deduplication check"""
+    if not (batch_id and test_id and asset_kind and source_key):
+        return None
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, storage_provider, storage_id, storage_url, ia_identifier, ia_url, youtube_id
+                FROM test_assets
+                WHERE batch_id=%s AND test_id=%s AND asset_kind=%s AND source_key=%s
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (batch_id, test_id, asset_kind, source_key),
+            )
+            return cur.fetchone()
     finally:
         conn.close()

@@ -236,17 +236,57 @@ def _get_display_name(obj):
 def _get_teacher_label(obj):
     """Build a readable teacher label from Khazana chapter payload."""
     base = _get_display_name(obj)
+    teacher_name = _extract_teacher_name(obj)
+    if base and base.strip().lower().endswith("by") and teacher_name:
+        return f"{base} {teacher_name}".strip()
+    return teacher_name or base
+
+
+def _extract_teacher_name(obj):
+    """Extract canonical teacher name (for DB), avoiding generic labels like '... by'."""
     if not isinstance(obj, dict):
-        return base
+        text = str(obj or "").strip()
+        if text.lower().endswith(" by"):
+            return None
+        return text or None
 
+    # Prefer explicit teacher/faculty style keys when present.
+    candidate_keys = (
+        "teacherName",
+        "facultyName",
+        "mentorName",
+        "instructorName",
+        "fullName",
+    )
+    for key in candidate_keys:
+        value = _get_val(obj, key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+
+    # Common API pattern: description = "Pankaj Sharma Sir ;Hinglish"
     description = _get_val(obj, "description")
-    teacher_from_desc = None
     if isinstance(description, str) and description.strip():
-        # API usually returns: "Pankaj Sharma Sir ;Hinglish"
         teacher_from_desc = description.split(";", 1)[0].strip()
+        if teacher_from_desc:
+            return teacher_from_desc
 
-    if base and base.strip().lower().endswith("by") and teacher_from_desc:
-        return f"{base} {teacher_from_desc}".strip()
+    # Fallback to display name only if it is not a generic chapter label.
+    base = _get_display_name(obj).strip()
+    if not base:
+        return None
+
+    if base.lower().endswith(" by"):
+        return None
+
+    # If name itself includes " by ", keep only right side (actual teacher).
+    lowered = base.lower()
+    marker = " by "
+    if marker in lowered:
+        idx = lowered.rfind(marker)
+        right = base[idx + len(marker):].strip()
+        if right:
+            return right
+
     return base
 
 
@@ -391,6 +431,30 @@ def _download_thumbnail_bytes(thumb_url):
         return None, None
 
 
+def _upsert_khazana_lecture_db(db_logger, **kwargs):
+    """Write Khazana lecture row to normalized table and legacy table for compatibility."""
+    if not db_logger:
+        return
+
+    # Primary write path (normalized schema)
+    try:
+        if hasattr(db_logger, "upsert_khazana_lecture_v2"):
+            db_logger.upsert_khazana_lecture_v2(**kwargs)
+    except Exception as e:
+        debugger.error(f"DB v2 upsert failed: {e}")
+
+    # Compatibility mirror for older consumers (e.g., legacy scripts/queries)
+    try:
+        if hasattr(db_logger, "upsert_khazana_lecture"):
+            legacy_kwargs = dict(kwargs)
+            legacy_kwargs.pop("topic_id", None)
+            if not legacy_kwargs.get("topic_name"):
+                legacy_kwargs["topic_name"] = kwargs.get("topic_name") or kwargs.get("topic_id")
+            db_logger.upsert_khazana_lecture(**legacy_kwargs)
+    except Exception as e:
+        debugger.error(f"DB legacy upsert failed: {e}")
+
+
 def _safe_filename(name, default="item"):
     if not name:
         return default
@@ -439,6 +503,62 @@ def _normalize_upload_platform(raw_value):
     if raw_text in ("tg", "telegram"):
         return "telegram"
     return raw_text or "internet_archive"
+
+
+def _build_ia_identifier(identifier_base, default_prefix="pw-khazana"):
+    try:
+        from mainLogic.utils.internet_archive_uploader import identifier_dash
+    except Exception:
+        identifier_dash = None
+
+    prefix = os.getenv("IA_IDENTIFIER_PREFIX") or default_prefix
+    raw_identifier = f"{prefix}-{identifier_base}"
+    if identifier_dash:
+        return identifier_dash(raw_identifier)
+    fallback = re.sub(r"[^a-z0-9-]+", "-", str(raw_identifier).strip().lower())
+    return fallback.strip("-")[:80] or "item"
+
+
+def _check_internet_archive_item(identifier, timeout=20):
+    if not identifier:
+        return {"exists": False, "identifier": None, "url": None, "error": "missing_identifier"}
+
+    url = f"https://archive.org/metadata/{identifier}"
+    try:
+        resp = requests.get(url, timeout=timeout)
+        if resp.status_code == 200:
+            payload = {}
+            try:
+                payload = resp.json() if resp.content else {}
+            except Exception:
+                payload = {}
+            server_identifier = payload.get("metadata", {}).get("identifier") or payload.get("identifier") or identifier
+            return {
+                "exists": True,
+                "identifier": str(server_identifier),
+                "url": f"https://archive.org/details/{server_identifier}",
+                "error": None,
+            }
+        if resp.status_code == 404:
+            return {
+                "exists": False,
+                "identifier": identifier,
+                "url": f"https://archive.org/details/{identifier}",
+                "error": None,
+            }
+        return {
+            "exists": False,
+            "identifier": identifier,
+            "url": f"https://archive.org/details/{identifier}",
+            "error": f"metadata_http_{resp.status_code}",
+        }
+    except Exception as e:
+        return {
+            "exists": False,
+            "identifier": identifier,
+            "url": f"https://archive.org/details/{identifier}",
+            "error": str(e),
+        }
 
 
 def upload_to_internet_archive(file_path, identifier_base, title=None, log_callback=None, progress_callback=None):
@@ -629,15 +749,16 @@ def _download_lecture(
     secondary_parent_id=None,
 ):
     tui, log_sink = _start_task_tui(f"Preparing lecture: {lecture_name or lecture_id}")
+    existing = None
     if not lecture_id or not lecture_url:
         error_msg = f"Missing required: lecture_id={bool(lecture_id)}, lecture_url={bool(lecture_url)}"
         debugger.error(error_msg)
         _stop_task_tui(tui, log_sink)
         return
     server_id = socket.gethostname()
+    force_mode = bool(os.getenv("KHZ_FORCE_DOWNLOAD"))
     if db_logger:
         existing = db_logger.get_khazana_lecture_status_v2(program_name, topic_id, lecture_id)
-        force_mode = bool(os.getenv("KHZ_FORCE_DOWNLOAD"))
         if existing and existing.get("status") == "done" and not force_mode:
             debugger.info(f"Skipping: {lecture_name or lecture_id}")
             _stop_task_tui(tui, log_sink)
@@ -662,6 +783,32 @@ def _download_lecture(
             debugger.info(f"Skipping in-progress upload: {lecture_name or lecture_id}")
             _stop_task_tui(tui, log_sink)
             return
+    if upload_internet_archive and not force_mode:
+        ia_identifier = _build_ia_identifier(f"{program_name}-{lecture_id}", default_prefix="pw-khazana")
+        ia_remote = _check_internet_archive_item(ia_identifier)
+        if ia_remote.get("exists"):
+            debugger.info(f"IA already has lecture; syncing DB and skipping upload: {lecture_name or lecture_id}")
+            if db_logger:
+                _upsert_khazana_lecture_db(
+                    db_logger,
+                    program_name=program_name,
+                    lecture_id=lecture_id,
+                    topic_id=topic_id,
+                    topic_name=topic_name,
+                    subject_name=subject_name,
+                    teacher_name=teacher_name,
+                    sub_topic_name=sub_topic_name,
+                    lecture_name=lecture_name,
+                    lecture_url=lecture_url,
+                    thumbnail_url=thumb_url,
+                    status="done",
+                    server_id=server_id,
+                    ia_identifier=ia_remote.get("identifier"),
+                    ia_url=ia_remote.get("url"),
+                    error=None,
+                )
+            _stop_task_tui(tui, log_sink)
+            return
     thumb_blob = None
     thumb_mime = None
     if thumb_url and db_logger:
@@ -673,7 +820,7 @@ def _download_lecture(
             thumb_mime = None
     if db_logger:
         debugger.info(f"DB: {lecture_name or lecture_id} -> downloading")
-        db_logger.upsert_khazana_lecture_v2(
+        _upsert_khazana_lecture_db(db_logger,
             program_name=program_name,
             topic_id=topic_id,
             lecture_id=lecture_id,
@@ -714,29 +861,67 @@ def _download_lecture(
             mp4decrypt_path = shutil.which("mp4decrypt") or "mp4decrypt"
         ffmpeg_path = shutil.which("ffmpeg") or "ffmpeg"
         
-        downloader = Main(
-            id=lecture_id,
-            name=lecture_name or lecture_id,
-            batch_name=batch_name,
-            topic_name=effective_secondary_parent,
-            lecture_url=lecture_url,
-            video_id=video_id,
-            directory=base_dir,
-            token=token,
-            random_id=random_id,
-            mp4d=mp4decrypt_path,
-            ffmpeg=ffmpeg_path,
-            verbose=False,
-            tui=True,
-            tui_instance=tui,
-        )
-        downloader.process()
-        file_path = os.path.join(base_dir, f"{lecture_name or lecture_id}.mp4")
-        file_size = os.path.getsize(file_path) if os.path.exists(file_path) else None
+        expected_file_path = os.path.join(base_dir, f"{lecture_name or lecture_id}.mp4")
+        candidate_paths = []
+        if expected_file_path:
+            candidate_paths.append(expected_file_path)
+        if existing and existing.get("file_path"):
+            candidate_paths.append(str(existing.get("file_path")))
+
+        # Deduplicate while preserving order.
+        dedup_paths = []
+        seen = set()
+        for path in candidate_paths:
+            key = str(path)
+            if key in seen:
+                continue
+            seen.add(key)
+            dedup_paths.append(path)
+
+        file_path = None
+        file_size = None
+        reused_existing_file = False
+        for path in dedup_paths:
+            if not path or not os.path.exists(path):
+                continue
+            try:
+                size = os.path.getsize(path)
+            except Exception:
+                continue
+            if size > 0:
+                file_path = path
+                file_size = size
+                reused_existing_file = True
+                break
+
+        if reused_existing_file:
+            debugger.info(f"Reusing existing file for lecture: {lecture_name or lecture_id}")
+            if tui:
+                tui.set_status("Reusing existing download")
+        else:
+            downloader = Main(
+                id=lecture_id,
+                name=lecture_name or lecture_id,
+                batch_name=batch_name,
+                topic_name=effective_secondary_parent,
+                lecture_url=lecture_url,
+                video_id=video_id,
+                directory=base_dir,
+                token=token,
+                random_id=random_id,
+                mp4d=mp4decrypt_path,
+                ffmpeg=ffmpeg_path,
+                verbose=False,
+                tui=True,
+                tui_instance=tui,
+            )
+            downloader.process()
+            file_path = expected_file_path
+            file_size = os.path.getsize(file_path) if os.path.exists(file_path) else None
         if db_logger:
             status = "done" if not upload_internet_archive else "downloaded"
             debugger.info(f"DB: {lecture_name or lecture_id} -> {status}")
-            db_logger.upsert_khazana_lecture_v2(
+            _upsert_khazana_lecture_db(db_logger,
                 program_name=program_name,
                 lecture_id=lecture_id,
                 topic_id=topic_id,
@@ -763,7 +948,7 @@ def _download_lecture(
                 tui.setup_upload_progress()
             if db_logger:
                 debugger.info(f"DB: {lecture_name or lecture_id} -> uploading")
-                db_logger.upsert_khazana_lecture_v2(
+                _upsert_khazana_lecture_db(db_logger,
                     program_name=program_name,
                     lecture_id=lecture_id,
                     topic_id=topic_id,
@@ -776,6 +961,41 @@ def _download_lecture(
                 raise RuntimeError("Downloaded file not found for upload")
             if os.path.getsize(file_path) == 0:
                 raise RuntimeError("Downloaded file is empty")
+            ia_identifier = _build_ia_identifier(f"{program_name}-{lecture_id}", default_prefix="pw-khazana")
+            ia_remote = _check_internet_archive_item(ia_identifier)
+            if ia_remote.get("exists"):
+                debugger.info(f"IA already has lecture after download; skipping upload: {lecture_name or lecture_id}")
+                if db_logger:
+                    _upsert_khazana_lecture_db(
+                        db_logger,
+                        program_name=program_name,
+                        lecture_id=lecture_id,
+                        topic_id=topic_id,
+                        status="done",
+                        server_id=server_id,
+                        file_path=file_path if os.path.exists(file_path) else None,
+                        file_size=file_size,
+                        ia_identifier=ia_remote.get("identifier"),
+                        ia_url=ia_remote.get("url"),
+                        error=None,
+                    )
+                if delete_after_upload and file_path and os.path.exists(file_path):
+                    try:
+                        os.remove(file_path)
+                    except Exception as e:
+                        debugger.error(f"Failed to delete file after IA-exists skip: {e}")
+                    else:
+                        if db_logger:
+                            _upsert_khazana_lecture_db(
+                                db_logger,
+                                program_name=program_name,
+                                lecture_id=lecture_id,
+                                topic_id=topic_id,
+                                status="done",
+                                file_path=None,
+                                file_size=None,
+                            )
+                return
             last_error = None
             upload_result = None
             for attempt in range(1, max(1, upload_retries) + 1):
@@ -806,7 +1026,7 @@ def _download_lecture(
                 if db_logger:
                     debugger.info(f"DB: {lecture_name or lecture_id} -> done (IA)")
                     try:
-                        db_logger.upsert_khazana_lecture_v2(
+                        _upsert_khazana_lecture_db(db_logger,
                             program_name=program_name,
                             lecture_id=lecture_id,
                             topic_id=topic_id,
@@ -831,7 +1051,7 @@ def _download_lecture(
                         else:
                             if db_logger:
                                 try:
-                                    db_logger.upsert_khazana_lecture_v2(
+                                    _upsert_khazana_lecture_db(db_logger,
                                         program_name=program_name,
                                         lecture_id=lecture_id,
                                         topic_id=topic_id,
@@ -847,7 +1067,7 @@ def _download_lecture(
                     tui.finish_upload_progress(success=False)
                 error_text = last_error or "upload_failed"
                 if db_logger:
-                    db_logger.upsert_khazana_lecture_v2(
+                    _upsert_khazana_lecture_db(db_logger,
                         program_name=program_name,
                         lecture_id=lecture_id,
                         topic_id=topic_id,
@@ -866,7 +1086,7 @@ def _download_lecture(
                     else:
                         if db_logger:
                             try:
-                                db_logger.upsert_khazana_lecture_v2(
+                                _upsert_khazana_lecture_db(db_logger,
                                     program_name=program_name,
                                     lecture_id=lecture_id,
                                     topic_id=topic_id,
@@ -878,7 +1098,7 @@ def _download_lecture(
                                 debugger.error(f"Failed to clear file_path in DB after deletion: {e}")
     except Exception as e:
         if db_logger:
-            db_logger.upsert_khazana_lecture_v2(
+            _upsert_khazana_lecture_db(db_logger,
                 program_name=program_name,
                 lecture_id=lecture_id,
                 topic_id=topic_id,
@@ -922,9 +1142,9 @@ def _download_asset(
         _stop_task_tui(tui, log_sink)
         return
     server_id = socket.gethostname()
+    force_mode = bool(os.getenv("KHZ_FORCE_DOWNLOAD"))
     if db_logger:
         existing = db_logger.get_khazana_asset_status(program_name, content_id, kind)
-        force_mode = bool(os.getenv("KHZ_FORCE_DOWNLOAD"))
         if existing and existing.get("status") == "done" and not force_mode:
             debugger.info(f"Skipping asset: {content_name or content_id}")
             _stop_task_tui(tui, log_sink)
@@ -961,6 +1181,30 @@ def _download_asset(
             topic_name=topic_name,
             sub_topic_name=sub_topic_name,
         )
+    if upload_internet_archive and not force_mode:
+        ia_identifier = _build_ia_identifier(f"{program_name}-{content_id}-{kind}", default_prefix="pw-khazana")
+        ia_remote = _check_internet_archive_item(ia_identifier)
+        if ia_remote.get("exists"):
+            debugger.info(f"IA already has asset; syncing DB and skipping upload: {content_name or content_id}")
+            if db_logger:
+                db_logger.upsert_khazana_asset(
+                    program_name=program_name,
+                    content_id=content_id,
+                    kind=kind,
+                    content_name=content_name,
+                    file_url=file_url,
+                    status="done",
+                    server_id=server_id,
+                    subject_name=subject_name,
+                    teacher_name=teacher_name,
+                    topic_name=topic_name,
+                    sub_topic_name=sub_topic_name,
+                    ia_identifier=ia_remote.get("identifier"),
+                    ia_url=ia_remote.get("url"),
+                    error=None,
+                )
+            _stop_task_tui(tui, log_sink)
+            return
 
     asset_dir = os.path.join(base_dir, "khazana_assets")
     os.makedirs(asset_dir, exist_ok=True)
@@ -1052,6 +1296,39 @@ def _download_asset(
                 raise RuntimeError("Downloaded asset file not found for upload")
             if os.path.getsize(file_path) == 0:
                 raise RuntimeError("Downloaded asset file is empty")
+            ia_identifier = _build_ia_identifier(f"{program_name}-{content_id}-{kind}", default_prefix="pw-khazana")
+            ia_remote = _check_internet_archive_item(ia_identifier)
+            if ia_remote.get("exists"):
+                debugger.info(f"IA already has asset after download; skipping upload: {content_name or content_id}")
+                if db_logger:
+                    db_logger.upsert_khazana_asset(
+                        program_name=program_name,
+                        content_id=content_id,
+                        kind=kind,
+                        status="done",
+                        server_id=server_id,
+                        file_path=file_path if os.path.exists(file_path) else None,
+                        file_size=file_size,
+                        ia_identifier=ia_remote.get("identifier"),
+                        ia_url=ia_remote.get("url"),
+                        error=None,
+                    )
+                if delete_after_upload and file_path and os.path.exists(file_path):
+                    try:
+                        os.remove(file_path)
+                    except Exception as e:
+                        debugger.error(f"Failed to delete asset after IA-exists skip: {e}")
+                    else:
+                        if db_logger:
+                            db_logger.upsert_khazana_asset(
+                                program_name=program_name,
+                                content_id=content_id,
+                                kind=kind,
+                                status="done",
+                                file_path=None,
+                                file_size=None,
+                            )
+                return
             last_error = None
             upload_result = None
             for attempt in range(1, max(1, upload_retries) + 1):
@@ -1278,6 +1555,7 @@ def main():
         for teacher in teachers_sel:
             teacher_id = _get_any_id(teacher) or _get_display_name(teacher)
             teacher_label = _get_teacher_label(teacher)
+            teacher_name = _extract_teacher_name(teacher)
             try:
                 topics = batch_api.process(
                     "topics",
@@ -1382,7 +1660,7 @@ def main():
                                 delete_after_upload=delete_after_upload,
                                 upload_retries=upload_retries,
                                 subject_name=subject_label,
-                                teacher_name=teacher_label,
+                                teacher_name=teacher_name,
                                 topic_name=topic_label,
                                 sub_topic_name=sub_topic_label,
                                 video_id=video_id,
@@ -1409,7 +1687,7 @@ def main():
                                     delete_after_upload=delete_after_upload,
                                     upload_retries=upload_retries,
                                     subject_name=subject_label,
-                                    teacher_name=teacher_label,
+                                    teacher_name=teacher_name,
                                     topic_name=topic_label,
                                     sub_topic_name=sub_topic_label,
                                 )

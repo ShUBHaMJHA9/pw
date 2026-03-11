@@ -1095,10 +1095,7 @@ def upload_to_internet_archive(file_path, lecture_id, lecture_title, batch_id=No
     except Exception as e:
         return {"ok": False, "error": f"internet_archive importer failed: {e}"}
 
-    prefix = _get_env_text("IA_IDENTIFIER_PREFIX") or "pw-lecture"
-
-    ident_base = f"{prefix}-{batch_id}-{lecture_id}" if batch_id else f"{prefix}-{lecture_id}"
-    identifier = identifier_dash(ident_base)
+    identifier = _build_ia_identifier(batch_id=batch_id, lecture_id=lecture_id)
 
     try:
         # Call upload_file - returns identifier string on success
@@ -1115,6 +1112,61 @@ def upload_to_internet_archive(file_path, lecture_id, lecture_title, batch_id=No
         }
     except Exception as e:
         return {"ok": False, "error": str(e)}
+
+
+def _build_ia_identifier(batch_id, lecture_id):
+    try:
+        from mainLogic.utils.internet_archive_uploader import identifier_dash
+    except Exception:
+        identifier_dash = None
+
+    prefix = _get_env_text("IA_IDENTIFIER_PREFIX") or "pw-lecture"
+    ident_base = f"{prefix}-{batch_id}-{lecture_id}" if batch_id else f"{prefix}-{lecture_id}"
+    if identifier_dash:
+        return identifier_dash(ident_base)
+    fallback = re.sub(r"[^a-z0-9-]+", "-", str(ident_base).strip().lower())
+    return fallback.strip("-")[:80] or "item"
+
+
+def _check_internet_archive_item(identifier, timeout=20):
+    if not identifier:
+        return {"exists": False, "identifier": None, "url": None, "error": "missing_identifier"}
+    url = f"https://archive.org/metadata/{identifier}"
+    try:
+        resp = requests.get(url, timeout=timeout)
+        if resp.status_code == 200:
+            payload = {}
+            try:
+                payload = resp.json() if resp.content else {}
+            except Exception:
+                payload = {}
+            server_identifier = payload.get("metadata", {}).get("identifier") or payload.get("identifier") or identifier
+            return {
+                "exists": True,
+                "identifier": str(server_identifier),
+                "url": f"https://archive.org/details/{server_identifier}",
+                "error": None,
+            }
+        if resp.status_code == 404:
+            return {
+                "exists": False,
+                "identifier": identifier,
+                "url": f"https://archive.org/details/{identifier}",
+                "error": None,
+            }
+        return {
+            "exists": False,
+            "identifier": identifier,
+            "url": f"https://archive.org/details/{identifier}",
+            "error": f"metadata_http_{resp.status_code}",
+        }
+    except Exception as e:
+        return {
+            "exists": False,
+            "identifier": identifier,
+            "url": f"https://archive.org/details/{identifier}",
+            "error": str(e),
+        }
 
 def process_lecture_download_upload(lecture, lecture_name, subject_slug, subject_name):
     if not download_enabled:
@@ -1141,6 +1193,51 @@ def process_lecture_download_upload(lecture, lecture_name, subject_slug, subject
     teacher_ids_text = ", ".join(teacher_ids) if teacher_ids else None
     teacher_names_text = ", ".join(teacher_names) if teacher_names else None
     lecture_cache_id = _get_lecture_cache_id(lecture)
+    ia_identifier = _build_ia_identifier(batch_id=batch_id, lecture_id=lecture.id) if upload_internet_archive else None
+    ia_remote = None
+    if upload_internet_archive and not force_reupload:
+        ia_remote = _check_internet_archive_item(ia_identifier)
+        if ia_remote.get("exists"):
+            debugger.info("  Skipping upload: already available on Internet Archive. Syncing DB status.")
+            if db_logger:
+                try:
+                    db_logger.mark_status(
+                        batch_id,
+                        lecture.id,
+                        "done",
+                        file_path=None,
+                        file_size=None,
+                        error=None,
+                    )
+                    db_logger.update_ia_upload(
+                        batch_id,
+                        lecture.id,
+                        ia_identifier=ia_remote.get("identifier"),
+                        ia_url=ia_remote.get("url"),
+                    )
+                    db_logger.upsert_backup_id(
+                        batch_id,
+                        lecture.id,
+                        platform="internet_archive",
+                        message_id=str(ia_remote.get("identifier")) if ia_remote.get("identifier") else None,
+                        metadata=json.dumps(
+                            {
+                                "url": ia_remote.get("url"),
+                                "archive_filename": f"{lecture.id}.mp4",
+                                "lecture_name": lecture_name,
+                            }
+                        ),
+                    )
+                except Exception as e:
+                    debugger.error(f"  Failed to sync IA-existing lecture into DB: {e}")
+            if lecture_cache_id:
+                _local_mark_upload_done(
+                    batch_id,
+                    lecture_cache_id,
+                    lecture_name=lecture_name,
+                    chapter_name=getattr(lecture, "chapter_name", None),
+                )
+            return
 
     debugger.info(f"  Lecture teachers attr: {getattr(lecture, 'teachers', None)}")
     debugger.info(f"  Extracted teacher IDs: {teacher_ids_text}, Names: {teacher_names_text}")
@@ -1546,6 +1643,65 @@ def process_lecture_download_upload(lecture, lecture_name, subject_slug, subject
                     "chapter_name": getattr(lecture, "chapter_name", ""),
                     "lecture_name": lecture_name,
                 }
+
+                ia_remote_late = _check_internet_archive_item(ia_identifier)
+                if ia_remote_late.get("exists"):
+                    debugger.info("  IA item found after download. Skipping IA upload and syncing DB.")
+                    if db_logger:
+                        file_size = os.path.getsize(file_path) if os.path.exists(file_path) else None
+                        db_logger.mark_status(
+                            batch_id,
+                            lecture.id,
+                            "done",
+                            file_path=file_path,
+                            file_size=file_size,
+                            error=None,
+                        )
+                        db_logger.update_ia_upload(
+                            batch_id,
+                            lecture.id,
+                            ia_identifier=ia_remote_late.get("identifier"),
+                            ia_url=ia_remote_late.get("url"),
+                        )
+                        db_logger.upsert_backup_id(
+                            batch_id,
+                            lecture.id,
+                            platform="internet_archive",
+                            message_id=str(ia_remote_late.get("identifier")) if ia_remote_late.get("identifier") else None,
+                            metadata=json.dumps(
+                                {
+                                    "url": ia_remote_late.get("url"),
+                                    "archive_filename": f"{lecture.id}.mp4",
+                                    "lecture_name": lecture_name,
+                                }
+                            ),
+                        )
+                    if delete_after_upload and file_path and os.path.exists(file_path):
+                        try:
+                            os.remove(file_path)
+                        except Exception as e:
+                            debugger.error(f"  Failed to delete file after IA-exists skip: {e}")
+                        else:
+                            if db_logger:
+                                try:
+                                    db_logger.mark_status(
+                                        batch_id,
+                                        lecture.id,
+                                        "done",
+                                        file_path=None,
+                                        file_size=None,
+                                        error=None,
+                                    )
+                                except Exception as e:
+                                    debugger.error(f"  Failed to update DB after deleting local file: {e}")
+                    if lecture_cache_id:
+                        _local_mark_upload_done(
+                            batch_id,
+                            lecture_cache_id,
+                            lecture_name=lecture_name,
+                            chapter_name=getattr(lecture, "chapter_name", None),
+                        )
+                    return
 
                 upload_result = upload_to_internet_archive(
                     file_path,
