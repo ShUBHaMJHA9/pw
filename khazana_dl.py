@@ -532,7 +532,19 @@ def _check_internet_archive_item(identifier, timeout=20):
                 payload = resp.json() if resp.content else {}
             except Exception:
                 payload = {}
-            server_identifier = payload.get("metadata", {}).get("identifier") or payload.get("identifier") or identifier
+            metadata = payload.get("metadata") if isinstance(payload, dict) else {}
+            if not isinstance(metadata, dict):
+                metadata = {}
+            server_identifier = metadata.get("identifier") or payload.get("identifier")
+            # IA may return HTTP 200 with an empty object for missing identifiers.
+            # Only treat as existing when identifier metadata is present.
+            if not server_identifier:
+                return {
+                    "exists": False,
+                    "identifier": identifier,
+                    "url": f"https://archive.org/details/{identifier}",
+                    "error": "metadata_missing_identifier",
+                }
             return {
                 "exists": True,
                 "identifier": str(server_identifier),
