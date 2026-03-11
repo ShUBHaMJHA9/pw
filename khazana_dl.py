@@ -3,7 +3,7 @@
 
 This script walks Khazana program -> subject -> teacher -> topic -> sub-topic
 and downloads selected lectures. It records status in the
-`khazana_lecture_uploads` table when DB logging is enabled.
+`khazana_contents` table when DB logging is enabled.
 """
 import json
 import os
@@ -432,7 +432,7 @@ def _download_thumbnail_bytes(thumb_url):
 
 
 def _upsert_khazana_lecture_db(db_logger, **kwargs):
-    """Write Khazana lecture row to normalized table and legacy table for compatibility."""
+    """Write Khazana lecture row to the normalized unified Khazana table."""
     if not db_logger:
         return
 
@@ -442,17 +442,6 @@ def _upsert_khazana_lecture_db(db_logger, **kwargs):
             db_logger.upsert_khazana_lecture_v2(**kwargs)
     except Exception as e:
         debugger.error(f"DB v2 upsert failed: {e}")
-
-    # Compatibility mirror for older consumers (e.g., legacy scripts/queries)
-    try:
-        if hasattr(db_logger, "upsert_khazana_lecture"):
-            legacy_kwargs = dict(kwargs)
-            legacy_kwargs.pop("topic_id", None)
-            if not legacy_kwargs.get("topic_name"):
-                legacy_kwargs["topic_name"] = kwargs.get("topic_name") or kwargs.get("topic_id")
-            db_logger.upsert_khazana_lecture(**legacy_kwargs)
-    except Exception as e:
-        debugger.error(f"DB legacy upsert failed: {e}")
 
 
 def _safe_filename(name, default="item"):
