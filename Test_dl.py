@@ -201,6 +201,191 @@ def _extract_image_payload(image_ids, language_code="en"):
     return None
 
 
+def _extract_image_payloads(image_ids, language_code="en"):
+    """Return a list of normalized image payload dicts for all detected images."""
+    payloads = []
+    if isinstance(image_ids, dict):
+        preferred = image_ids.get(language_code)
+        if isinstance(preferred, list):
+            payloads.extend([p for p in preferred if isinstance(p, dict)])
+        elif isinstance(preferred, dict):
+            payloads.append(preferred)
+
+        if not payloads:
+            for value in image_ids.values():
+                if isinstance(value, list):
+                    payloads.extend([p for p in value if isinstance(p, dict)])
+                elif isinstance(value, dict):
+                    payloads.append(value)
+                    break
+    elif isinstance(image_ids, list):
+        payloads.extend([p for p in image_ids if isinstance(p, dict)])
+
+    dedup = []
+    seen = set()
+    for payload in payloads:
+        key = str(payload.get("_id") or payload.get("key") or json.dumps(payload, sort_keys=True))
+        if key in seen:
+            continue
+        seen.add(key)
+        dedup.append(payload)
+    return dedup
+
+
+def _question_id_from_node(question):
+    if not isinstance(question, dict):
+        return ""
+    return str(
+        question.get("_id")
+        or question.get("id")
+        or question.get("questionId")
+        or question.get("qid")
+        or ""
+    )
+
+
+def _extract_numeric(*values):
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, (int, float)):
+            return value
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                continue
+            try:
+                if "." in text:
+                    return float(text)
+                return int(text)
+            except ValueError:
+                continue
+    return None
+
+
+def _normalize_option_id_list(values):
+    ids = []
+    seen = set()
+
+    def _push(v):
+        text = str(v or "").strip()
+        if not text or text in seen:
+            return
+        seen.add(text)
+        ids.append(text)
+
+    if isinstance(values, (str, int, float)):
+        _push(values)
+        return ids
+
+    if isinstance(values, dict):
+        for key in ("_id", "id", "optionId", "option_id", "value"):
+            if values.get(key):
+                _push(values.get(key))
+                break
+        return ids
+
+    if isinstance(values, list):
+        for item in values:
+            if isinstance(item, dict):
+                for key in ("_id", "id", "optionId", "option_id", "value"):
+                    if item.get(key):
+                        _push(item.get(key))
+                        break
+            else:
+                _push(item)
+    return ids
+
+
+def _extract_correct_option_ids(question, result_question=None, result_item=None):
+    """Extract correct option ids from all known API shapes."""
+    result_question = result_question if isinstance(result_question, dict) else {}
+    result_item = result_item if isinstance(result_item, dict) else {}
+
+    candidates = [
+        question.get("solutions") if isinstance(question, dict) else None,
+        question.get("correctOptions") if isinstance(question, dict) else None,
+        question.get("correctOptionIds") if isinstance(question, dict) else None,
+        question.get("correctAnswer") if isinstance(question, dict) else None,
+        question.get("answerIds") if isinstance(question, dict) else None,
+        result_question.get("solutions"),
+        result_question.get("correctOptions"),
+        result_question.get("correctOptionIds"),
+        result_question.get("correctAnswer"),
+        result_question.get("answerIds"),
+    ]
+
+    topper_result = result_item.get("topperResult") or {}
+    if isinstance(topper_result, dict):
+        candidates.extend(
+            [
+                topper_result.get("markedSolutions"),
+                topper_result.get("solutions"),
+                topper_result.get("correctOptions"),
+            ]
+        )
+
+    for candidate in candidates:
+        ids = _normalize_option_id_list(candidate)
+        if ids:
+            return ids
+
+    # Final fallback: infer from option-level flags
+    options = []
+    if isinstance(question, dict):
+        options = question.get("options") or []
+    if not options and isinstance(result_question, dict):
+        options = result_question.get("options") or []
+
+    inferred = []
+    for opt in options:
+        if not isinstance(opt, dict):
+            continue
+        if opt.get("isCorrect") is True or opt.get("correct") is True or opt.get("isAnswer") is True:
+            opt_id = str(opt.get("_id") or opt.get("id") or opt.get("optionId") or "").strip()
+            if opt_id:
+                inferred.append(opt_id)
+    if inferred:
+        return inferred
+
+    return []
+
+
+def _extract_correct_answer_text(question, result_question=None, result_item=None):
+    """Extract text/numeric correct answer when option ids are unavailable."""
+    result_question = result_question if isinstance(result_question, dict) else {}
+    result_item = result_item if isinstance(result_item, dict) else {}
+
+    candidates = [
+        question.get("solutionText") if isinstance(question, dict) else None,
+        question.get("correctAnswerText") if isinstance(question, dict) else None,
+        question.get("answerText") if isinstance(question, dict) else None,
+        question.get("correctAnswer") if isinstance(question, dict) and isinstance(question.get("correctAnswer"), str) else None,
+        result_question.get("solutionText"),
+        result_question.get("correctAnswerText"),
+        result_question.get("answerText"),
+        result_question.get("correctAnswer") if isinstance(result_question.get("correctAnswer"), str) else None,
+    ]
+
+    topper_result = result_item.get("topperResult") or {}
+    your_result = result_item.get("yourResult") or {}
+    average_result = result_item.get("averageResult") or {}
+    for src in (topper_result, your_result, average_result):
+        if isinstance(src, dict):
+            candidates.extend(
+                [
+                    src.get("markedSolutionText"),
+                    src.get("solutionText"),
+                    src.get("answerText"),
+                ]
+            )
+
+    for value in candidates:
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
 def _parse_youtube_id(url):
     if not url:
         return None
@@ -217,14 +402,67 @@ def _parse_youtube_id(url):
     return None
 
 
+def _looks_like_video_url(url):
+    if not isinstance(url, str):
+        return False
+    text = url.strip()
+    if not text.startswith(("http://", "https://")):
+        return False
+    lowered = text.lower()
+    parsed = urlparse(text)
+    path = (parsed.path or "").strip()
+    if path in ("", "/"):
+        return False
+
+    video_hints = (
+        ".mp4",
+        ".m3u8",
+        ".mov",
+        ".mkv",
+        ".webm",
+        "manifest",
+        "playlist",
+        "video",
+        "stream",
+    )
+    if any(token in lowered for token in video_hints):
+        return True
+    if _parse_youtube_id(text):
+        return True
+    return False
+
+
+def _build_url_from_base_key(node):
+    if not isinstance(node, dict):
+        return None
+    base_url = node.get("baseUrl") or node.get("base_url")
+    key = node.get("key") or node.get("path") or node.get("file")
+    if isinstance(key, str) and key.startswith(("http://", "https://")):
+        return key
+    if isinstance(base_url, str) and isinstance(key, str) and base_url.strip() and key.strip():
+        return f"{base_url.rstrip('/')}/{key.lstrip('/')}"
+    return None
+
+
 def _collect_video_urls(node, found=None):
     if found is None:
         found = set()
     if isinstance(node, dict):
+        candidate = _build_url_from_base_key(node)
+        if candidate and _looks_like_video_url(candidate):
+            found.add(candidate)
+
         for key, value in node.items():
             lk = str(key).lower()
             if isinstance(value, str) and value.startswith(("http://", "https://")):
-                if "video" in lk or "solution" in lk or "url" in lk:
+                if (
+                    "video" in lk
+                    or "solutionvideo" in lk
+                    or "videosrc" in lk
+                    or "videourl" in lk
+                    or "url" in lk
+                    or "youtube" in lk
+                ) and _looks_like_video_url(value):
                     found.add(value)
             else:
                 _collect_video_urls(value, found)
@@ -232,6 +470,35 @@ def _collect_video_urls(node, found=None):
         for item in node:
             _collect_video_urls(item, found)
     return found
+
+
+def _fetch_test_result(batch_api, test_id, test_mapping_id):
+    """Fetch my-result payload (when available) to capture solved answer data."""
+    if not (test_id and test_mapping_id):
+        return None
+    url = (
+        f"https://api.penpencil.co/v3/test-service/tests/{test_id}/my-result"
+        f"?testId={test_id}&testMappingId={test_mapping_id}"
+    )
+    payload, status_code, _ = Endpoint(url=url, headers=batch_api.DEFAULT_HEADERS).fetch()
+    if status_code == 200 and isinstance(payload, dict) and payload.get("success"):
+        return payload
+    return None
+
+
+def _index_result_questions(result_payload):
+    """Map result question payload by question id for quick fallback lookups."""
+    result_map = {}
+    if not isinstance(result_payload, dict):
+        return result_map
+    for item in ((result_payload.get("data") or {}).get("questions") or []):
+        if not isinstance(item, dict):
+            continue
+        q = item.get("question") or {}
+        qid = _question_id_from_node(q)
+        if qid:
+            result_map[qid] = item
+    return result_map
 
 
 def _download_file_bytes(url, headers=None, timeout=45):
@@ -251,6 +518,30 @@ def _download_file_bytes(url, headers=None, timeout=45):
             pass
 
     return None, None
+
+
+def _is_cloudfront_root_url(url):
+    try:
+        parsed = urlparse(str(url or ""))
+    except Exception:
+        return False
+    if "cloudfront.net" not in (parsed.netloc or ""):
+        return False
+    path = (parsed.path or "").strip()
+    return path in ("", "/")
+
+
+def _is_video_mime(mime_type):
+    if not mime_type:
+        return False
+    head = str(mime_type).split(";", 1)[0].strip().lower()
+    if head.startswith("video/"):
+        return True
+    return head in {
+        "application/octet-stream",
+        "application/x-mpegurl",
+        "application/vnd.apple.mpegurl",
+    }
 
 
 def _extension_from_mime(mime_type, fallback_ext=".bin"):
@@ -297,10 +588,16 @@ def _upload_to_ia_bytes(content, filename_hint, ext, media_type="image"):
             pass
 
 
-def _upload_url_asset_to_ia(url, source_key, headers, default_ext):
+def _upload_url_asset_to_ia(url, source_key, headers, default_ext, expected_kind=None):
+    if expected_kind == "video" and _is_cloudfront_root_url(url):
+        return {"ok": False, "error": "cloudfront_root_not_downloadable"}
+
     data, mime_type = _download_file_bytes(url, headers=headers)
     if not data:
         return {"ok": False, "error": "download_failed"}
+
+    if expected_kind == "video" and not _is_video_mime(mime_type):
+        return {"ok": False, "error": f"unexpected_video_mime:{mime_type}"}
 
     ext = _extension_from_mime(mime_type, fallback_ext=default_ext)
     filename_hint = source_key or os.path.basename(urlparse(url).path) or "asset"
@@ -387,8 +684,25 @@ def _store_solution_video(db_logger, batch_id, test_id, question_id, source_key,
     if existing and existing.get("storage_url"):
         return
 
-    upload = _upload_url_asset_to_ia(video_url, source_key, headers=headers, default_ext=".mp4")
+    upload = _upload_url_asset_to_ia(
+        video_url,
+        source_key,
+        headers=headers,
+        default_ext=".mp4",
+        expected_kind="video",
+    )
     if not upload.get("ok"):
+        db_logger.upsert_test_asset(
+            batch_id=batch_id,
+            test_id=test_id,
+            question_id=question_id,
+            asset_kind="solution_video",
+            source_key=source_key,
+            source_url=video_url,
+            asset_type="video",
+            status="failed",
+            error=upload.get("error") or "upload_failed",
+        )
         return
 
     db_logger.upsert_test_asset(
@@ -406,7 +720,15 @@ def _store_solution_video(db_logger, batch_id, test_id, question_id, source_key,
     )
 
 
-def _process_test_payload(db_logger, batch, test_summary, payload, source_url, auth_headers):
+def _process_test_payload(
+    db_logger,
+    batch,
+    test_summary,
+    payload,
+    source_url,
+    auth_headers,
+    result_question_map=None,
+):
     data = payload.get("data") or {}
     test_meta = data.get("test") or {}
     test_id = str(test_meta.get("_id") or test_summary.get("_id") or test_summary.get("id") or "")
@@ -433,7 +755,7 @@ def _process_test_payload(db_logger, batch, test_summary, payload, source_url, a
         status="downloading",
     )
 
-    # Extract questions from sections (CORRECT API STRUCTURE)
+    # Extract questions from sections (current API structure)
     # API returns: data.sections[].questions[] NOT data.questions[]
     all_questions = []
     sections = data.get("sections") or []
@@ -448,6 +770,7 @@ def _process_test_payload(db_logger, batch, test_summary, payload, source_url, a
         questions = data.get("questions") or []
     
     debugger.info(f"Processing {len(questions)} questions from {len(sections)} sections")
+    processed_count = 0
     
     for container in questions:
         # Questions from sections are direct dict objects (not wrapped in "question" key)
@@ -455,22 +778,43 @@ def _process_test_payload(db_logger, batch, test_summary, payload, source_url, a
         if not isinstance(question, dict):
             continue
 
-        question_id = str(question.get("_id") or "")
+        question_id = _question_id_from_node(question)
         if not question_id:
             continue
         
-        question_number = question.get("questionNumber")
-        question_type = question.get("type")
-        positive_marks = question.get("positiveMarks")
-        negative_marks = question.get("negativeMarks")
+        result_item = (result_question_map or {}).get(question_id, {})
+        result_question = result_item.get("question") if isinstance(result_item, dict) else {}
+        if not isinstance(result_question, dict):
+            result_question = {}
+
+        question_number = question.get("questionNumber") or result_question.get("questionNumber")
+        question_type = question.get("type") or result_question.get("type")
+        positive_marks = _extract_numeric(
+            question.get("positiveMarks"),
+            question.get("positiveMarksStr"),
+            question.get("marks"),
+            result_question.get("positiveMarks"),
+            result_question.get("positiveMarksStr"),
+            result_question.get("marks"),
+        )
+        negative_marks = _extract_numeric(
+            question.get("negativeMarks"),
+            question.get("negativeMarksStr"),
+            result_question.get("negativeMarks"),
+            result_question.get("negativeMarksStr"),
+        )
         
         debugger.debug(f"Processing Q{question_number}: ID={question_id}, Type={question_type}, Marks=+{positive_marks}/{negative_marks}")
 
-        # Extract question image
-        image_obj = _extract_image_payload(question.get("imageIds"), language_code=language_code)
-        image_url = _image_object_to_url(image_obj)
+        # Extract and store all question images
+        image_payloads = _extract_image_payloads(question.get("imageIds"), language_code=language_code)
+        if not image_payloads and isinstance(result_question, dict):
+            image_payloads = _extract_image_payloads(result_question.get("imageIds"), language_code=language_code)
 
-        if image_url:
+        for image_obj in image_payloads:
+            image_url = _image_object_to_url(image_obj)
+            if not image_url:
+                continue
             source_key = str(image_obj.get("_id") or image_obj.get("key") or image_url)
             debugger.debug(f"  Storing question image: {source_key}")
             _store_question_image(
@@ -484,8 +828,19 @@ def _process_test_payload(db_logger, batch, test_summary, payload, source_url, a
             )
 
         # Store question metadata with marks and correct answers
-        correct_answers = question.get("solutions") or []
+        correct_answers = _extract_correct_option_ids(
+            question=question,
+            result_question=result_question,
+            result_item=result_item,
+        )
+        correct_answer_text = _extract_correct_answer_text(
+            question=question,
+            result_question=result_question,
+            result_item=result_item,
+        )
         debugger.debug(f"  Correct answers: {correct_answers}")
+        if not correct_answers and not correct_answer_text:
+            debugger.warning(f"  No correct-answer payload from API for question_id={question_id}")
         
         db_logger.upsert_test_question(
             batch_id=batch_id,
@@ -495,28 +850,30 @@ def _process_test_payload(db_logger, batch, test_summary, payload, source_url, a
             question_type=question_type,
             positive_marks=positive_marks,
             negative_marks=negative_marks,
-            difficulty_level=question.get("difficultyLevel"),
-            section_id=str(question.get("sectionId") or "") or None,
-            subject_id=str(question.get("subjectId") or "") or None,
-            chapter_id=str(question.get("chapterId") or "") or None,
-            topic_id=(question.get("topicId") or {}).get("_id") if isinstance(question.get("topicId"), dict) else question.get("topicId"),
-            sub_topic_id=str(question.get("subTopicId") or "") or None,
-            qbg_id=question.get("qbgId"),
-            qbg_subject_id=question.get("qbgSubjectId"),
-            qbg_chapter_id=question.get("qbgChapterId"),
-            qbg_topic_id=question.get("qbgTopicId"),
+            difficulty_level=question.get("difficultyLevel") or result_question.get("difficultyLevel"),
+            section_id=str(question.get("sectionId") or result_question.get("sectionId") or "") or None,
+            subject_id=str(question.get("subjectId") or result_question.get("subjectId") or "") or None,
+            chapter_id=str(question.get("chapterId") or result_question.get("chapterId") or "") or None,
+            topic_id=(question.get("topicId") or {}).get("_id") if isinstance(question.get("topicId"), dict) else (question.get("topicId") or ((result_question.get("topicId") or {}).get("_id") if isinstance(result_question.get("topicId"), dict) else result_question.get("topicId"))),
+            sub_topic_id=str(question.get("subTopicId") or result_question.get("subTopicId") or "") or None,
+            qbg_id=question.get("qbgId") or result_question.get("qbgId"),
+            qbg_subject_id=question.get("qbgSubjectId") or result_question.get("qbgSubjectId"),
+            qbg_chapter_id=question.get("qbgChapterId") or result_question.get("qbgChapterId"),
+            qbg_topic_id=question.get("qbgTopicId") or result_question.get("qbgTopicId"),
             correct_option_ids_json=json.dumps(correct_answers),
-            correct_answer_text=question.get("solutionText"),
+            correct_answer_text=correct_answer_text,
         )
 
         # Store all options for this question
         options = question.get("options") or []
+        if not options and isinstance(result_question, dict):
+            options = result_question.get("options") or []
         debugger.debug(f"  Storing {len(options)} options")
         
         for option in options:
             if not isinstance(option, dict):
                 continue
-            option_id = str(option.get("_id") or "")
+            option_id = str(option.get("_id") or option.get("id") or option.get("optionId") or "")
             if not option_id:
                 continue
             texts = option.get("texts") or {}
@@ -536,7 +893,11 @@ def _process_test_payload(db_logger, batch, test_summary, payload, source_url, a
                 option_text=option_text,
             )
 
-        for desc in question.get("solutionDescription") or []:
+        solution_descriptions = question.get("solutionDescription") or []
+        if not solution_descriptions and isinstance(result_question, dict):
+            solution_descriptions = result_question.get("solutionDescription") or []
+
+        for desc in solution_descriptions:
             if not isinstance(desc, dict):
                 continue
             desc_image = _extract_image_payload(desc.get("imageIds"), language_code=language_code)
@@ -576,6 +937,23 @@ def _process_test_payload(db_logger, batch, test_summary, payload, source_url, a
                 video_url=video_url,
                 headers=auth_headers,
             )
+
+        if isinstance(result_question, dict):
+            for idx, video_url in enumerate(sorted(_collect_video_urls(result_question))):
+                source_key = f"{question_id}:result_video:{idx}:{_safe_filename(video_url, 'video')}"
+                _store_solution_video(
+                    db_logger=db_logger,
+                    batch_id=batch_id,
+                    test_id=test_id,
+                    question_id=question_id,
+                    source_key=source_key,
+                    video_url=video_url,
+                    headers=auth_headers,
+                )
+
+        processed_count += 1
+
+    debugger.info(f"Stored {processed_count} questions for test_id={test_id}")
 
     db_logger.upsert_test(
         batch_id=batch_id,
@@ -711,6 +1089,13 @@ def main():
             continue
 
         try:
+            mapping_id = (
+                test_summary.get("testStudentMappingId")
+                or ((payload.get("data") or {}).get("testStudentMapping") or {}).get("_id")
+            )
+            result_payload = _fetch_test_result(batch_api, test_id=test_id, test_mapping_id=mapping_id)
+            result_map = _index_result_questions(result_payload)
+
             _process_test_payload(
                 db_logger=db_logger,
                 batch=batch,
@@ -718,6 +1103,7 @@ def main():
                 payload=payload,
                 source_url=source_url,
                 auth_headers=batch_api.DEFAULT_HEADERS,
+                result_question_map=result_map,
             )
             debugger.success(f"✅ Test stored successfully: {test_name}")
             print(f"\n✅ SUCCESS - All questions, options, marks, and solutions stored for: {test_name}\n")

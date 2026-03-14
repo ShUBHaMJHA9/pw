@@ -507,6 +507,32 @@ def ensure_schema():
                 ) ENGINE=InnoDB;
                 """
             )
+            # Solutions: organized by type (description_step, question_video, result_video)
+            # Professional organization for multiple solutions per question
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS test_solutions (
+                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    batch_id VARCHAR(128) NOT NULL,
+                    test_id VARCHAR(128) NOT NULL,
+                    question_id VARCHAR(128) NOT NULL,
+                    solution_type VARCHAR(64) NOT NULL,
+                    step_number INT NULL,
+                    description_json JSON NULL,
+                    text TEXT NULL,
+                    ia_identifier VARCHAR(255) NULL,
+                    ia_url TEXT NULL,
+                    status VARCHAR(32) NOT NULL DEFAULT 'pending',
+                    error_text TEXT NULL,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE KEY uniq_solution (batch_id, test_id, question_id, solution_type, step_number),
+                    KEY idx_solution_question (test_id, question_id),
+                    KEY idx_solution_type (solution_type),
+                    KEY idx_solution_ia (ia_identifier)
+                ) ENGINE=InnoDB;
+                """
+            )
             cur.execute(
                 """
                 CREATE TABLE IF NOT EXISTS backup_id (
@@ -767,6 +793,150 @@ def ensure_schema():
             if not _constraint_exists("fk_upload_lecture"):
                 _try_execute(
                     "ALTER TABLE lecture_uploads ADD CONSTRAINT fk_upload_lecture FOREIGN KEY (batch_id, lecture_id) REFERENCES lectures(batch_id, lecture_id)"
+                )
+                # DPP (Daily Practice Problem) tables
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS dpp_notes (
+                        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                        batch_id VARCHAR(128) NOT NULL,
+                        dpp_id VARCHAR(128) NOT NULL,
+                        course_id BIGINT NULL,
+                        subject_id BIGINT NULL,
+                        chapter_id BIGINT NULL,
+                        batch_slug VARCHAR(128) NULL,
+                        subject_name VARCHAR(255) NULL,
+                        chapter_name VARCHAR(255) NULL,
+                        dpp_date DATETIME NULL,
+                        start_time DATETIME NULL,
+                        is_batch_doubt_enabled BOOLEAN DEFAULT FALSE,
+                        is_dpp_notes BOOLEAN DEFAULT TRUE,
+                        is_free BOOLEAN DEFAULT FALSE,
+                        is_simulated_lecture BOOLEAN DEFAULT FALSE,
+                        status VARCHAR(32) NOT NULL DEFAULT 'pending',
+                        error_text TEXT NULL,
+                        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE KEY uniq_dpp_notes (batch_id, dpp_id),
+                        KEY idx_dpp_batch (batch_id),
+                        KEY idx_dpp_status (status)
+                    ) ENGINE=InnoDB;
+                    """
+                )
+            
+                # DPP Problems (HomeworkDetail in API)
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS dpp_problems (
+                        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                        batch_id VARCHAR(128) NOT NULL,
+                        dpp_id VARCHAR(128) NOT NULL,
+                        problem_id VARCHAR(128) NOT NULL,
+                        problem_number INT NULL,
+                        topic VARCHAR(255) NULL,
+                        note TEXT NULL,
+                        has_solution_video BOOLEAN DEFAULT FALSE,
+                        solution_video_id VARCHAR(128) NULL,
+                        solution_video_type VARCHAR(64) NULL,
+                        solution_video_url TEXT NULL,
+                        solution_video_s3_url TEXT NULL,
+                        batch_subject_id VARCHAR(128) NULL,
+                        status VARCHAR(32) NOT NULL DEFAULT 'pending',
+                        error_text TEXT NULL,
+                        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE KEY uniq_dpp_problem (batch_id, dpp_id, problem_id),
+                        KEY idx_dpp_problem_dpp (batch_id, dpp_id),
+                        KEY idx_dpp_problem_status (status)
+                    ) ENGINE=InnoDB;
+                    """
+                )
+            
+                # DPP Attachments (Question PDFs, solution PDFs, etc.)
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS dpp_attachments (
+                        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                        batch_id VARCHAR(128) NOT NULL,
+                        dpp_id VARCHAR(128) NOT NULL,
+                        problem_id VARCHAR(128) NOT NULL,
+                        attachment_id VARCHAR(128) NOT NULL,
+                        attachment_name VARCHAR(255) NULL,
+                        source_url TEXT NULL,
+                        base_url TEXT NULL,
+                        source_key VARCHAR(255) NULL,
+                        file_path TEXT NULL,
+                        file_size BIGINT NULL,
+                        file_mime VARCHAR(64) NULL,
+                        ia_identifier VARCHAR(255) NULL,
+                        ia_url TEXT NULL,
+                        status VARCHAR(32) NOT NULL DEFAULT 'pending',
+                        error_text TEXT NULL,
+                        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE KEY uniq_dpp_attachment (batch_id, dpp_id, problem_id, attachment_id),
+                        KEY idx_dpp_attachment_problem (batch_id, dpp_id, problem_id),
+                        KEY idx_dpp_attachment_status (status),
+                        KEY idx_dpp_attachment_ia (ia_identifier)
+                    ) ENGINE=InnoDB;
+                    """
+                )
+            
+                # DPP Solution Videos
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS dpp_solution_videos (
+                        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                        batch_id VARCHAR(128) NOT NULL,
+                        dpp_id VARCHAR(128) NOT NULL,
+                        problem_id VARCHAR(128) NOT NULL,
+                        video_id VARCHAR(128) NOT NULL,
+                        video_type VARCHAR(64) NULL,
+                        source_url TEXT NULL,
+                        s3_url TEXT NULL,
+                        file_path TEXT NULL,
+                        file_size BIGINT NULL,
+                        file_mime VARCHAR(64) NULL,
+                        ia_identifier VARCHAR(255) NULL,
+                        ia_url TEXT NULL,
+                        status VARCHAR(32) NOT NULL DEFAULT 'pending',
+                        error_text TEXT NULL,
+                        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE KEY uniq_dpp_video (batch_id, dpp_id, problem_id, video_id),
+                        KEY idx_dpp_video_problem (batch_id, dpp_id, problem_id),
+                        KEY idx_dpp_video_status (status),
+                        KEY idx_dpp_video_ia (ia_identifier)
+                    ) ENGINE=InnoDB;
+                    """
+                )
+            
+                # DPP Uploads tracking (Internet Archive uploads)
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS dpp_uploads (
+                        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                        batch_id VARCHAR(128) NOT NULL,
+                        dpp_id VARCHAR(128) NOT NULL,
+                        asset_type VARCHAR(64) NOT NULL,
+                        asset_id VARCHAR(128) NOT NULL,
+                        status VARCHAR(32) NOT NULL DEFAULT 'pending',
+                        server_id VARCHAR(128) NULL,
+                        ia_identifier VARCHAR(255) NULL,
+                        ia_url TEXT NULL,
+                        file_path TEXT NULL,
+                        file_size BIGINT NULL,
+                        upload_bytes BIGINT NULL,
+                        upload_total BIGINT NULL,
+                        upload_percent FLOAT NULL,
+                        error_text TEXT NULL,
+                        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE KEY uniq_dpp_upload (batch_id, dpp_id, asset_type, asset_id),
+                        KEY idx_dpp_upload_status (status),
+                        KEY idx_dpp_upload_ia (ia_identifier)
+                    ) ENGINE=InnoDB;
+                    """
                 )
     finally:
         conn.close()
@@ -2644,3 +2814,420 @@ def get_test_asset_by_source(batch_id, test_id, asset_kind, source_key):
             return cur.fetchone()
     finally:
         conn.close()
+
+
+def upsert_test_solution(
+    batch_id,
+    test_id,
+    question_id,
+    solution_type,
+    step_number=None,
+    description_json=None,
+    text=None,
+    ia_identifier=None,
+    ia_url=None,
+    status=None,
+    error=None,
+):
+    """Upsert solution record for a question. Professional organization by type and step."""
+    if not (batch_id and test_id and question_id and solution_type):
+        return None
+    
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO test_solutions (
+                    batch_id,
+                    test_id,
+                    question_id,
+                    solution_type,
+                    step_number,
+                    description_json,
+                    text,
+                    ia_identifier,
+                    ia_url,
+                    status,
+                    error_text
+                )
+                VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, COALESCE(%s, 'pending'), %s
+                )
+                ON DUPLICATE KEY UPDATE
+                    step_number=COALESCE(VALUES(step_number), step_number),
+                    description_json=COALESCE(VALUES(description_json), description_json),
+                    text=COALESCE(VALUES(text), text),
+                    ia_identifier=COALESCE(VALUES(ia_identifier), ia_identifier),
+                    ia_url=COALESCE(VALUES(ia_url), ia_url),
+                    status=COALESCE(VALUES(status), status),
+                    error_text=COALESCE(VALUES(error_text), error_text)
+                """,
+                (
+                    batch_id,
+                    test_id,
+                    question_id,
+                    solution_type,
+                    step_number,
+                    description_json,
+                    text,
+                    ia_identifier,
+                    ia_url,
+                    status,
+                    error,
+                ),
+            )
+            return cur.lastrowid if cur.lastrowid > 0 else True
+    finally:
+        conn.close()
+
+
+def get_test_solution_by_type(batch_id, test_id, question_id, solution_type):
+    """Get solution(s) by type for a question"""
+    if not (batch_id and test_id and question_id and solution_type):
+        return []
+    
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, solution_type, step_number, description_json, text, 
+                       ia_identifier, ia_url, status, error_text
+                FROM test_solutions
+                WHERE batch_id=%s AND test_id=%s AND question_id=%s AND solution_type=%s
+                ORDER BY step_number ASC, id ASC
+                """,
+                (batch_id, test_id, question_id, solution_type),
+            )
+            return cur.fetchall() or []
+    finally:
+        conn.close()
+
+
+def get_all_test_solutions(batch_id, test_id, question_id):
+    """Get all solutions for a question, organized by type"""
+    if not (batch_id and test_id and question_id):
+        return {}
+    
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT solution_type, step_number, id, description_json, text,
+                       ia_identifier, ia_url, status
+                FROM test_solutions
+                WHERE batch_id=%s AND test_id=%s AND question_id=%s
+                ORDER BY solution_type, step_number ASC, id ASC
+                """,
+                (batch_id, test_id, question_id),
+            )
+            
+            solutions_by_type = {}
+            for row in cur.fetchall():
+                sol_type = row["solution_type"]
+                if sol_type not in solutions_by_type:
+                    solutions_by_type[sol_type] = []
+                solutions_by_type[sol_type].append(row)
+            
+            return solutions_by_type
+    finally:
+        conn.close()
+
+
+    # ============= DPP (Daily Practice Problem) Functions =============
+
+    def upsert_dpp_notes(batch_id, dpp_id, course_id=None, subject_id=None, chapter_id=None,
+                         batch_slug=None, subject_name=None, chapter_name=None,
+                         dpp_date=None, start_time=None, is_batch_doubt_enabled=False,
+                         is_dpp_notes=True, is_free=False, is_simulated_lecture=False,
+                         status="pending", error_text=None):
+        """Upsert DPP notes record (meta-info about a DPP set)"""
+        if not (batch_id and dpp_id):
+            return None
+    
+        conn = _connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO dpp_notes
+                    (batch_id, dpp_id, course_id, subject_id, chapter_id, batch_slug, 
+                     subject_name, chapter_name, dpp_date, start_time,
+                     is_batch_doubt_enabled, is_dpp_notes, is_free, is_simulated_lecture,
+                     status, error_text)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON DUPLICATE KEY UPDATE
+                        course_id=VALUES(course_id),
+                        subject_id=VALUES(subject_id),
+                        chapter_id=VALUES(chapter_id),
+                        batch_slug=VALUES(batch_slug),
+                        subject_name=VALUES(subject_name),
+                        chapter_name=VALUES(chapter_name),
+                        dpp_date=VALUES(dpp_date),
+                        start_time=VALUES(start_time),
+                        is_batch_doubt_enabled=VALUES(is_batch_doubt_enabled),
+                        is_dpp_notes=VALUES(is_dpp_notes),
+                        is_free=VALUES(is_free),
+                        is_simulated_lecture=VALUES(is_simulated_lecture),
+                        status=VALUES(status),
+                        error_text=VALUES(error_text),
+                        updated_at=CURRENT_TIMESTAMP
+                    """,
+                    (batch_id, dpp_id, course_id, subject_id, chapter_id, batch_slug,
+                     subject_name, chapter_name, dpp_date, start_time,
+                     is_batch_doubt_enabled, is_dpp_notes, is_free, is_simulated_lecture,
+                     status, error_text),
+                )
+                return cur.lastrowid if cur.lastrowid > 0 else True
+        finally:
+            conn.close()
+
+
+    def upsert_dpp_problem(batch_id, dpp_id, problem_id, problem_number=None, topic=None,
+                           note=None, has_solution_video=False, solution_video_id=None,
+                           solution_video_type=None, solution_video_url=None,
+                           solution_video_s3_url=None, batch_subject_id=None,
+                           status="pending", error_text=None):
+        """Upsert DPP problem (homework) record"""
+        if not (batch_id and dpp_id and problem_id):
+            return None
+    
+        conn = _connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO dpp_problems
+                    (batch_id, dpp_id, problem_id, problem_number, topic, note,
+                     has_solution_video, solution_video_id, solution_video_type,
+                     solution_video_url, solution_video_s3_url, batch_subject_id,
+                     status, error_text)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON DUPLICATE KEY UPDATE
+                        problem_number=VALUES(problem_number),
+                        topic=VALUES(topic),
+                        note=VALUES(note),
+                        has_solution_video=VALUES(has_solution_video),
+                        solution_video_id=VALUES(solution_video_id),
+                        solution_video_type=VALUES(solution_video_type),
+                        solution_video_url=VALUES(solution_video_url),
+                        solution_video_s3_url=VALUES(solution_video_s3_url),
+                        batch_subject_id=VALUES(batch_subject_id),
+                        status=VALUES(status),
+                        error_text=VALUES(error_text),
+                        updated_at=CURRENT_TIMESTAMP
+                    """,
+                    (batch_id, dpp_id, problem_id, problem_number, topic, note,
+                     has_solution_video, solution_video_id, solution_video_type,
+                     solution_video_url, solution_video_s3_url, batch_subject_id,
+                     status, error_text),
+                )
+                return cur.lastrowid if cur.lastrowid > 0 else True
+        finally:
+            conn.close()
+
+
+    def upsert_dpp_attachment(batch_id, dpp_id, problem_id, attachment_id, attachment_name=None,
+                              source_url=None, base_url=None, source_key=None, file_path=None,
+                              file_size=None, file_mime=None, ia_identifier=None, ia_url=None,
+                              status="pending", error_text=None):
+        """Upsert DPP attachment (question/solution PDF)"""
+        if not (batch_id and dpp_id and problem_id and attachment_id):
+            return None
+    
+        conn = _connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO dpp_attachments
+                    (batch_id, dpp_id, problem_id, attachment_id, attachment_name,
+                     source_url, base_url, source_key, file_path, file_size, file_mime,
+                     ia_identifier, ia_url, status, error_text)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON DUPLICATE KEY UPDATE
+                        attachment_name=VALUES(attachment_name),
+                        source_url=VALUES(source_url),
+                        base_url=VALUES(base_url),
+                        source_key=VALUES(source_key),
+                        file_path=VALUES(file_path),
+                        file_size=VALUES(file_size),
+                        file_mime=VALUES(file_mime),
+                        ia_identifier=VALUES(ia_identifier),
+                        ia_url=VALUES(ia_url),
+                        status=VALUES(status),
+                        error_text=VALUES(error_text),
+                        updated_at=CURRENT_TIMESTAMP
+                    """,
+                    (batch_id, dpp_id, problem_id, attachment_id, attachment_name,
+                     source_url, base_url, source_key, file_path, file_size, file_mime,
+                     ia_identifier, ia_url, status, error_text),
+                )
+                return cur.lastrowid if cur.lastrowid > 0 else True
+        finally:
+            conn.close()
+
+
+    def upsert_dpp_solution_video(batch_id, dpp_id, problem_id, video_id, video_type=None,
+                                 source_url=None, s3_url=None, file_path=None, file_size=None,
+                                 file_mime=None, ia_identifier=None, ia_url=None,
+                                 status="pending", error_text=None):
+        """Upsert DPP solution video record"""
+        if not (batch_id and dpp_id and problem_id and video_id):
+            return None
+    
+        conn = _connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO dpp_solution_videos
+                    (batch_id, dpp_id, problem_id, video_id, video_type,
+                     source_url, s3_url, file_path, file_size, file_mime,
+                     ia_identifier, ia_url, status, error_text)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON DUPLICATE KEY UPDATE
+                        video_type=VALUES(video_type),
+                        source_url=VALUES(source_url),
+                        s3_url=VALUES(s3_url),
+                        file_path=VALUES(file_path),
+                        file_size=VALUES(file_size),
+                        file_mime=VALUES(file_mime),
+                        ia_identifier=VALUES(ia_identifier),
+                        ia_url=VALUES(ia_url),
+                        status=VALUES(status),
+                        error_text=VALUES(error_text),
+                        updated_at=CURRENT_TIMESTAMP
+                    """,
+                    (batch_id, dpp_id, problem_id, video_id, video_type,
+                     source_url, s3_url, file_path, file_size, file_mime,
+                     ia_identifier, ia_url, status, error_text),
+                )
+                return cur.lastrowid if cur.lastrowid > 0 else True
+        finally:
+            conn.close()
+
+
+    def upsert_dpp_upload(batch_id, dpp_id, asset_type, asset_id, status="pending",
+                         server_id=None, ia_identifier=None, ia_url=None,
+                         file_path=None, file_size=None, upload_bytes=None, upload_total=None,
+                         upload_percent=None, error_text=None):
+        """Upsert DPP upload tracking record (Internet Archive)"""
+        if not (batch_id and dpp_id and asset_type and asset_id):
+            return None
+    
+        conn = _connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO dpp_uploads
+                    (batch_id, dpp_id, asset_type, asset_id, status, server_id,
+                     ia_identifier, ia_url, file_path, file_size,
+                     upload_bytes, upload_total, upload_percent, error_text)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON DUPLICATE KEY UPDATE
+                        status=VALUES(status),
+                        server_id=VALUES(server_id),
+                        ia_identifier=VALUES(ia_identifier),
+                        ia_url=VALUES(ia_url),
+                        file_path=VALUES(file_path),
+                        file_size=VALUES(file_size),
+                        upload_bytes=VALUES(upload_bytes),
+                        upload_total=VALUES(upload_total),
+                        upload_percent=VALUES(upload_percent),
+                        error_text=VALUES(error_text),
+                        updated_at=CURRENT_TIMESTAMP
+                    """,
+                    (batch_id, dpp_id, asset_type, asset_id, status, server_id,
+                     ia_identifier, ia_url, file_path, file_size,
+                     upload_bytes, upload_total, upload_percent, error_text),
+                )
+                return cur.lastrowid if cur.lastrowid > 0 else True
+        finally:
+            conn.close()
+
+
+    def get_dpp_problems(batch_id, dpp_id):
+        """Get all problems for a DPP"""
+        if not (batch_id and dpp_id):
+            return []
+    
+        conn = _connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT * FROM dpp_problems
+                    WHERE batch_id=%s AND dpp_id=%s
+                    ORDER BY problem_number ASC, created_at ASC
+                    """,
+                    (batch_id, dpp_id),
+                )
+                return cur.fetchall() or []
+        finally:
+            conn.close()
+
+
+    def get_dpp_attachments(batch_id, dpp_id, problem_id=None):
+        """Get attachments for DPP problem(s)"""
+        if not (batch_id and dpp_id):
+            return []
+    
+        conn = _connect()
+        try:
+            with conn.cursor() as cur:
+                if problem_id:
+                    cur.execute(
+                        """
+                        SELECT * FROM dpp_attachments
+                        WHERE batch_id=%s AND dpp_id=%s AND problem_id=%s
+                        ORDER BY created_at ASC
+                        """,
+                        (batch_id, dpp_id, problem_id),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        SELECT * FROM dpp_attachments
+                        WHERE batch_id=%s AND dpp_id=%s
+                        ORDER BY problem_id, created_at ASC
+                        """,
+                        (batch_id, dpp_id),
+                    )
+                return cur.fetchall() or []
+        finally:
+            conn.close()
+
+
+    def get_dpp_solution_videos(batch_id, dpp_id, problem_id=None):
+        """Get solution videos for DPP problem(s)"""
+        if not (batch_id and dpp_id):
+            return []
+    
+        conn = _connect()
+        try:
+            with conn.cursor() as cur:
+                if problem_id:
+                    cur.execute(
+                        """
+                        SELECT * FROM dpp_solution_videos
+                        WHERE batch_id=%s AND dpp_id=%s AND problem_id=%s
+                        ORDER BY created_at ASC
+                        """,
+                        (batch_id, dpp_id, problem_id),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        SELECT * FROM dpp_solution_videos
+                        WHERE batch_id=%s AND dpp_id=%s
+                        ORDER BY problem_id, created_at ASC
+                        """,
+                        (batch_id, dpp_id),
+                    )
+                return cur.fetchall() or []
+        finally:
+            conn.close()
